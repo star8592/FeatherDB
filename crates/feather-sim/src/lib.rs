@@ -9,6 +9,7 @@ pub mod placement;
 pub mod planner;
 pub mod range_resize;
 pub mod resize;
+pub mod split_boundary;
 
 pub use fault::{FaultAction, FaultEvent, FaultReplayReport, FaultTrace, replay_migration_faults};
 
@@ -34,4 +35,9 @@ pub use range_resize::{
     HASH_SPACE_END, LifecycleResizeDecision, LifecycleResizeError, LifecycleResizePlan,
     RangeCommitOutcome, RangeResizeError, RangeResizeKind, RangeResizePlan, RangeTablet,
     RangeTabletMap, TabletRangeLifecycle,
+};
+
+pub use split_boundary::{
+    RangeLoadSample, SplitBoundaryDecision, SplitBoundaryError, SplitBoundaryStrategy,
+    choose_split_boundary,
 };

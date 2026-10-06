@@ -335,3 +335,31 @@ The invariant to preserve is stronger than the exact boundary algorithm:
 
     every committed generation has total, non-overlapping hash-space coverage
     and deterministic routing.
+
+
+## Split-boundary policy
+
+The physical range transform currently uses hash midpoint as the correctness baseline.
+
+A separate executable experiment now compares HashMidpoint, ByteMedian, and HeatMedian using sampled per-token bytes and request heat.
+
+The first experiment demonstrates that the objectives conflict:
+
+- byte-balanced boundaries can worsen heat balance;
+- heat-balanced boundaries can worsen byte balance;
+- a same-token hotspot is fundamentally unsplittable by range boundary.
+
+Therefore boundary selection is now modeled as a policy decision.
+
+Proposed control flow:
+
+    resize trigger
+      -> choose objective
+      -> validate telemetry confidence
+      -> choose boundary strategy
+      -> validate interior boundary
+      -> execute fenced range transform
+
+HashMidpoint remains the fallback when data/heat telemetry is missing, stale, noisy, or not worth the added control-plane complexity.
+
+See docs/experiments/2026-10-07-split-boundary.md.

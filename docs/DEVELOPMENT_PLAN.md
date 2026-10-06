@@ -72,6 +72,21 @@ Exit gate for ADR-0002 candidate:
 - weight-proportional responsibility within documented tolerance;
 - no algorithm selected solely from one happy-path benchmark.
 
+### Split-boundary experiment status
+
+Implemented research comparison:
+
+- HashMidpoint;
+- ByteMedian;
+- HeatMedian;
+- byte-imbalance metric;
+- heat-imbalance metric;
+- same-token hotspot negative case.
+
+Result: no single boundary strategy dominates both byte and heat objectives. Midpoint remains the deterministic fallback; data-aware strategies stay explicit policy candidates.
+
+See docs/experiments/2026-10-07-split-boundary.md.
+
 ### Physical range-resize implementation status
 
 Implemented:
@@ -261,7 +276,7 @@ Fault tests:
 - ADR-0001: still Proposed.
 - ADR-0002: still Proposed.
 
-Next priority: deterministic network/clock fault adapters, split-boundary strategy experiments, then compact million-tablet simulation.
+Next priority: deterministic network/clock fault adapters, multi-objective split-boundary policy, then compact million-tablet simulation.
 
 ### Placement planner hypothesis
 
