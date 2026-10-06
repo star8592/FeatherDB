@@ -2,6 +2,7 @@
 
 mod hash;
 pub mod metrics;
+pub mod migration;
 pub mod model;
 pub mod placement;
 pub mod planner;
@@ -10,6 +11,10 @@ pub use metrics::{
     JoinMovementBreakdown, PlacementMetrics, TransitionMovementBreakdown,
     feasible_capacity_inclusion_targets, join_movement_breakdown, moved_bytes, movement_ratio,
     transition_movement_breakdown, zone_aware_capacity_inclusion_targets,
+};
+pub use migration::{
+    MigrationBudget, MigrationError, MigrationPriority, MigrationScheduler, MigrationState,
+    MigrationTask, TickReport,
 };
 pub use model::{AdminState, Cluster, Node, NodeId, Placement, Tablet, TabletId};
 pub use placement::{FailureDomainPolicy, PlacementStrategy};
