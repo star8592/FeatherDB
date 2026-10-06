@@ -62,7 +62,7 @@ We deliberately do **not** freeze architecture after the first survey.
 - Round 3 — protocol synthesis and simulation models
 - Round 4 — architecture freeze for the first prototype
 
-See `docs/ROADMAP.md` and `docs/research/`.
+See `docs/DEVELOPMENT_PLAN.md`, `docs/ROADMAP.md`, and `docs/research/`.
 
 ## Open source
 

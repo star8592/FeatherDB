@@ -1,0 +1,196 @@
+# FeatherDB Development Plan
+
+Status: Active
+Last reviewed: 2026-10-06
+
+This is the execution plan for the research/pre-prototype phase. It supersedes ad-hoc implementation order; `docs/ROADMAP.md` remains the broader research roadmap.
+
+## Engineering rules
+
+1. Evidence before architecture freeze.
+2. Simulator before distributed production code.
+3. Every topology operation is idempotent, resumable, and epoch-fenced.
+4. Every unbounded queue or metadata structure is a bug until proven otherwise.
+5. Low-resource nodes are first-class test targets.
+6. Placement policy and physical migration are separate mechanisms.
+7. Failure detection never directly authorizes destructive membership changes.
+8. A feature is not done without a machine-checkable invariant or explicit reason why one is impossible.
+
+## Phase 0 — repository hygiene
+
+Deliverables:
+- resolve license metadata mismatch;
+- ignore build artifacts;
+- keep application `Cargo.lock` committed;
+- `cargo fmt --check`, `cargo clippy -- -D warnings`, and `cargo test` clean.
+
+Exit gate: clean Git status after generated build artifacts are ignored and all quality checks pass.
+
+## Phase 1 — placement laboratory
+
+### 1.1 Strategy abstraction
+
+Implement interchangeable:
+- hash ring baseline;
+- weighted rendezvous (WRH);
+- constrained WRH.
+
+Separate:
+- node eligibility,
+- ranking algorithm,
+- failure-domain selection policy,
+- metrics.
+
+### 1.2 Metrics
+
+Measure:
+- replica distribution;
+- feasible capacity-allocation error (not raw weight share when RF/failure-domain constraints make that target impossible);
+- bytes/tablets moved;
+- zone/rack collisions;
+- planner operations/time;
+- estimated metadata/working-set bytes.
+
+### 1.3 Scenarios
+
+Run at 1K / 10K / 100K tablets where practical:
+- homogeneous baseline;
+- heterogeneous 1:2:4:8 capacity;
+- weak-node join;
+- strong-node join;
+- node drain;
+- node removal;
+- insufficient failure domains.
+
+Exit gate for ADR-0002 candidate:
+- deterministic replay;
+- zero avoidable domain collisions for constrained policy;
+- bounded movement on join/leave;
+- weight-proportional responsibility within documented tolerance;
+- no algorithm selected solely from one happy-path benchmark.
+
+## Phase 2 — migration model
+
+Add:
+- `desired_replica_set`;
+- `actual_replica_set`;
+- migration tasks;
+- per-node and cluster byte/concurrency budgets;
+- priority for replica repair over balancing;
+- crash/restart of migration workers.
+
+Exit gate:
+- migration queues remain bounded;
+- interrupted moves resume safely;
+- foreground protection can stop/reduce background movement;
+- desired state may advance without falsely claiming actual convergence.
+
+## Phase 3 — topology transaction simulator
+
+Implement executable versions of:
+- Join;
+- Drain/Leave;
+- Forced removal;
+- Replace;
+- TopologyEpoch;
+- OperationId idempotency;
+- Incarnation fencing.
+
+Inject a crash at every transition boundary.
+
+Exit gate for ADR-0001 candidate:
+- committed ownership never rolls backward;
+- stale workers cannot publish newer ownership;
+- repeated operations converge;
+- metadata-quorum loss pauses mutations without fabricating ownership.
+
+## Phase 4 — deterministic event/fault engine
+
+Seed-driven events:
+- Crash/Restart;
+- Partition/Heal;
+- Delay/Drop/Duplicate/Reorder;
+- DiskFull/slow I/O;
+- CPU stall;
+- telemetry oscillation;
+- repeated join/leave churn.
+
+Persist replay traces for every failure.
+
+Exit gate:
+- same seed reproduces the same trace and result;
+- 100-node churn campaign converges after faults stop;
+- all modeled queues and state sizes remain bounded.
+
+## Phase 5 — leaderless data semantics
+
+Only after placement/topology are credible, model:
+- N/R/W quorum;
+- version model (HLC + causal metadata candidates);
+- conflict policies;
+- hinted handoff candidate;
+- anti-entropy/repair.
+
+Do not implement general SQL or distributed ACID transactions.
+
+## Phase 6 — implementation substrate benchmarks
+
+Benchmark, do not guess:
+- local storage: Fjall/redb and a baseline alternative;
+- transport: QUIC implementation candidates;
+- serialization/wire format;
+- memory allocator/working-set behavior on 256/512 MiB limits.
+
+## Phase 7 — three-node prototype
+
+One `featherd` binary:
+- bootstrap/join;
+- PUT/GET/DELETE/CAS;
+- tablet ownership;
+- leaderless replication;
+- bounded repair/migration;
+- structured health/degraded-state reporting.
+
+Fault tests:
+- kill -9;
+- restart;
+- network partition;
+- disk full;
+- slow node;
+- add/drain/replace.
+
+## Progress snapshot — 2026-10-06
+
+- Phase 0: implementation complete locally; pending commit in this review batch.
+- Phase 1.1: complete for hash-ring / WRH / constrained-WRH comparison.
+- Phase 1.2: partial; movement, excess-join movement, replica counts, zone/rack collisions implemented.
+- Phase 1.3: partial; strong-node join and failure-domain-pressure scenarios implemented.
+- Tests: 10 passing.
+- First experiment: `docs/experiments/2026-10-06-placement-baseline.md`.
+- ADR-0001: still Proposed.
+- ADR-0002: still Proposed.
+
+Next priority: feasible-capacity target metrics, leave/weight-change scenarios, compact simulator representation, then desired-vs-actual migration.
+
+## Immediate sprint
+
+1. Refactor `feather-sim` into model / placement / metrics modules.
+2. Replace placeholder scoring with a real WRH implementation while retaining the placeholder only if useful as a named baseline.
+3. Add hash-ring baseline.
+4. Add comparable join-scenario metrics.
+5. Run tests, fmt, clippy.
+6. Record first comparison results in `docs/experiments/`.
+7. Do not accept ADR-0002 yet; use results to decide the next experiment.
+
+## Explicit non-goals now
+
+- SQL and joins
+- general distributed transactions
+- vector search
+- Kubernetes operator
+- admin UI
+- production QUIC protocol
+- custom storage engine
+- compatibility guarantees
+
+Those can only be reconsidered after the core protocol evidence is strong.

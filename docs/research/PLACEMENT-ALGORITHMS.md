@@ -73,6 +73,19 @@ A tablet map is a better abstraction boundary than direct key->node hashing.
 Risk:
 Every tablet replica has metadata/runtime cost. Tablet count therefore must be explicitly resource-bounded.
 
+
+## Weighted HRW formula note
+
+The active simulator now uses weighted HRW scoring equivalent to:
+
+    score = -weight / ln(U)
+
+where `U` is a deterministic object/node hash mapped to (0,1), choosing the highest score. This matches the weighted-HRW formulation described in the 2025 IETF BESS Internet-Draft (work in progress, not an RFC):
+
+https://datatracker.ietf.org/doc/html/draft-ietf-bess-weighted-hrw-02
+
+The simulator currently uses `f64`. That is **not yet accepted for production ownership computation** because cross-platform numeric determinism must be specified explicitly.
+
 ## Proposed FeatherDB direction
 
 Key mapping:

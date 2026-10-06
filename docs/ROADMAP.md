@@ -1,5 +1,7 @@
 # FeatherDB Research & Architecture Roadmap
 
+Execution status and current sprint are tracked in `docs/DEVELOPMENT_PLAN.md`.
+
 ## Rule zero
 
 Do not implement a production protocol because it sounds elegant. Every important mechanism needs evidence, explicit invariants, a failure model, resource budgets, and a simulation/test plan.
