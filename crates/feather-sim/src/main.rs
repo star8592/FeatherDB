@@ -150,14 +150,9 @@ fn run_scenario(name: &str, before: &Cluster, after: &Cluster, affected_nodes: &
         print_result(label, before, after, affected_nodes, &old, &new);
     }
 
-    let current = PlacementStrategy::WeightedRendezvous
-        .place(before, FailureDomainPolicy::HIERARCHICAL);
-    let planned = plan_rebalance(
-        after,
-        &current,
-        FailureDomainPolicy::HIERARCHICAL,
-        usize::MAX,
-    );
+    let current =
+        PlacementStrategy::WeightedRendezvous.place(before, FailureDomainPolicy::HIERARCHICAL);
+    let planned = plan_rebalance(after, &current, FailureDomainPolicy::HIERARCHICAL);
     print_result(
         "stateful-planner",
         before,
