@@ -122,9 +122,11 @@ A quota-aware planner prototype now converges on the current join/leave/weight/f
 
 ## Tablet lifecycle evidence
 
-Official ScyllaDB and TiKV documentation confirms that production partition units need dynamic split/merge control and anti-oscillation/resource limits. ADR-0002 therefore also requires a tablet lifecycle policy with hysteresis, cooldown, and metadata-budget validation.
+Official ScyllaDB and TiKV documentation confirms that production partition units need dynamic split/merge control and anti-oscillation/resource limits. The first logical tablet-count controller is now executable with hysteresis, cooldown, metadata-budget validation, topology/generation fencing, and replay-safe commit semantics.
 
-See docs/architecture/TABLET-LIFECYCLE-v0.md.
+ADR-0002 is still not Accepted because physical key-range split/merge execution, merge compatibility, and production metadata cost remain unverified.
+
+See docs/architecture/TABLET-LIFECYCLE-v0.md and docs/experiments/2026-10-07-tablet-resize-controller.md.
 
 ## Acceptance gate
 

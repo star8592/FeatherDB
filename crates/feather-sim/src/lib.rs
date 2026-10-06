@@ -6,6 +6,7 @@ pub mod migration;
 pub mod model;
 pub mod placement;
 pub mod planner;
+pub mod resize;
 
 pub use metrics::{
     JoinMovementBreakdown, PlacementMetrics, TransitionMovementBreakdown,
@@ -19,3 +20,8 @@ pub use migration::{
 pub use model::{AdminState, Cluster, Node, NodeId, Placement, Tablet, TabletId};
 pub use placement::{FailureDomainPolicy, PlacementStrategy};
 pub use planner::{PlannerResult, plan_rebalance};
+
+pub use resize::{
+    ResizeBlockReason, ResizeCommitOutcome, ResizeConfigError, ResizeDecision, ResizeKind,
+    ResizePlan, TabletResizePolicy, TabletResizeState,
+};

@@ -74,7 +74,7 @@ Exit gate for ADR-0002 candidate:
 
 ### Tablet lifecycle track
 
-Before ADR-0002 acceptance, implement split/merge hysteresis, cooldown, metadata-budget limits, and crash-replay tests. See docs/architecture/TABLET-LIFECYCLE-v0.md.
+Logical split/merge control now implements hysteresis, cooldown, metadata-budget limits, generation/topology fencing, and crash-replay idempotency. Physical key-range split/merge execution remains open before ADR-0002 acceptance. See docs/architecture/TABLET-LIFECYCLE-v0.md.
 
 ## Phase 2 — migration model
 
@@ -213,12 +213,13 @@ Fault tests:
 - Phase 1.2: partial; movement, excess-join movement, replica counts, zone/rack collisions implemented.
 - Phase 1.3: partial; strong-node join and failure-domain-pressure scenarios implemented.
 - RF=2 single-node removal movement now matches a failure-domain-aware constrained lower bound exactly.
-- Tests: 32 passing.
+- Tablet resize controller: logical count control implemented with hysteresis, cooldown, metadata budget, epoch/generation fencing, and replay idempotency.
+- Tests: 42 passing.
 - First experiment: `docs/experiments/2026-10-06-placement-baseline.md`.
 - ADR-0001: still Proposed.
 - ADR-0002: still Proposed.
 
-Next priority: tablet resize state machine, deterministic fault events, then compact million-tablet simulation.
+Next priority: physical key-range resize execution, deterministic fault events, then compact million-tablet simulation.
 
 ### Placement planner hypothesis
 

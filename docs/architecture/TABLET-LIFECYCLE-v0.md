@@ -127,3 +127,76 @@ Every transition must be idempotent and topology-epoch fenced.
 - how resize interacts with anti-entropy state.
 
 These remain experimental until simulator evidence exists.
+
+
+## Executable controller status
+
+The first lifecycle controller is now implemented in `feather-sim`.
+
+It models logical tablet-count decisions before physical key-range execution.
+
+Implemented state:
+
+    stable tablet-count generation
+        -> evaluate resize trigger
+        -> reconstructible ResizePlan
+        -> generation/topology-fenced commit
+        -> new tablet-count generation
+        -> cooldown
+
+The plan carries:
+
+    kind
+    topology_epoch
+    from_generation
+    from_count
+    to_count
+    planned_at_tick
+
+Commit outcomes are explicit:
+
+    Applied
+    AlreadyApplied
+    StaleTopology
+    StaleGeneration
+
+This deliberately keeps resize planning reconstructible and avoids creating a persistent resize-task journal before the physical executor exists.
+
+### Research baseline vs product defaults
+
+The simulator has a `research_hysteresis` constructor using the 2x split / 0.5x merge shape documented by ScyllaDB.
+
+The caller must still explicitly supply:
+
+- target tablet bytes;
+- cooldown ticks;
+- estimated metadata bytes per tablet;
+- metadata budget.
+
+The target size, cooldown, and metadata cost are therefore not hard-coded product claims.
+
+### Metadata ceiling
+
+A split is rejected before allocation if:
+
+    next_tablet_count * metadata_bytes_per_tablet
+        > metadata_budget_bytes
+
+The budget is protocol-visible and testable.
+
+This is important for FeatherDB's low-memory-node target: tablet cardinality cannot expand without a bounded metadata model.
+
+### Current crash semantics
+
+At the logical controller layer:
+
+- crash before commit: plan can be regenerated;
+- crash after commit but before acknowledgement: replay returns AlreadyApplied;
+- topology changes fence old plans;
+- later resize generations fence stale commits.
+
+Physical split/merge execution still needs its own transition states and crash-injection campaign.
+
+See:
+
+    docs/experiments/2026-10-07-tablet-resize-controller.md

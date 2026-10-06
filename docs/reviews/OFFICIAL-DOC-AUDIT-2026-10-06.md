@@ -213,3 +213,28 @@ Reference:
 FeatherDB does not infer that it needs per-tablet Raft membership. The design lesson adopted here is only that multi-replica ownership changes require explicit safe intermediate-state semantics.
 
 The current simulator uses atomic grouped tablet-map cutover after all required Rebalance copies have completed and the complete final replica set has been revalidated.
+
+
+## Tablet resize controller audit note
+
+Current ScyllaDB documentation gives concrete evidence for wide resize hysteresis:
+
+- split when average tablet size grows above roughly 2x target;
+- merge when average tablet size falls below roughly 0.5x target;
+- tablet count is also constrained by per-shard tablet pressure because each tablet replica has fixed overhead.
+
+Current TiKV/PD documentation exposes `split-merge-interval` specifically to prevent newly split Regions from being merged immediately.
+
+References:
+- https://docs.scylladb.com/manual/stable/architecture/tablets.html
+- https://docs.scylladb.com/manual/stable/cql/ddl.html
+- https://docs.scylladb.com/manual/stable/reference/configuration-parameters.html
+- https://tikv.org/docs/7.1/deploy/configure/pd-configuration-file/
+
+FeatherDB now uses these as research evidence for:
+
+    wide hysteresis
+    cooldown
+    metadata cardinality budget
+
+It does not freeze Scylla's target tablet size or TiKV's wall-clock intervals as FeatherDB defaults.
