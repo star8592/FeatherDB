@@ -261,10 +261,10 @@ The replacement planner uses:
 
 | Scenario | Movement ratio | Moves | Count lower bound | Gap | Zone collisions | Target error |
 |---|---:|---:|---:|---:|---:|---:|
-| strong heterogeneous join | 0.500000 | 10,000 | 10,000 | *(0(* | 0 | 0.000043 |
+| strong heterogeneous join | 0.500000 | 10,000 | 10,000 | 0 | 0 | 0.000043 |
 | heterogeneous leave | 0.196550 | 3,931 | 3,499 | 432 | 0 | 0.000000 |
 | weight 2 -> 6 | 0.144350 | 2,887 | 2,817 | 70 | 0 | 0.000053 |
-| fourth failure domain joins | 0.142833 | 4,285 | 4,285 | *(0(* | 0 | 0.000071 |
+| fourth failure domain joins | 0.142833 | 4,285 | 4,285 | 0 | 0 | 0.000071 |
 
 The count lower bound ignores per-tablet uniqueness and failure-domain constraints, so a positive gap is not automatically avoidable churn.
 
@@ -303,3 +303,50 @@ ADR-0002 remains Proposed because:
 - rack-aware target feasibility is still incomplete;
 - unequal tablet bytes/hotness are not modeled;
 - split/merge lifecycle is not executable yet.
+
+
+## Iteration 5 — constraint-aware removal lower bound
+
+The previous movement lower bound was too weak for forced removal because it ignored the fact that a missing replica cannot be assigned to a node/failure domain already represented by that tablet.
+
+For the 10K heterogeneous leave scenario:
+
+- removed-node replica slots: **3,499**
+- target counts after removal: node 1 = 2,000; node 3 = 8,000; node 4 = 10,000
+- retained counts: node 1 = 1,790; node 3 = 6,277; node 4 = 8,434
+- node 4 therefore needs **1,566** new replicas
+- among the 3,499 affected tablets, **2,365 already contain node 4**
+- only `3,499 - 2,365 = 1,134` missing slots can directly accept node 4
+- unavoidable extra movement: `1,566 - 1,134 = 432`
+
+Therefore the true constrained lower bound is:
+
+    3,499 + 432 = 3,931 moves
+
+The current stateful planner performs exactly **3,931 moves**, so the apparent 432-move gap was measurement error, not planner churn.
+
+### 100K confirmation
+
+| Metric | Result |
+|---|---:|
+| planner moves | 38,746 |
+| constrained movement lower bound | 38,746 |
+| movement gap | **0** |
+| zone collisions | 0 |
+| target error | 0.000000 |
+| full four-scenario release run | 1.18 s |
+| peak RSS | ~35.8 MiB |
+
+### Decision update
+
+For the tested RF=2 single-node removal topology, movement optimality is now understood and the planner reaches the constrained lower bound.
+
+This does **not** prove global optimality for:
+
+- RF>2;
+- multiple simultaneous removed owners;
+- multiple nodes per failure domain;
+- unequal tablet byte sizes;
+- hotness-aware placement.
+
+The simulator should extend the lower-bound proof only when those scenarios become relevant instead of introducing a general min-cost-flow planner prematurely.

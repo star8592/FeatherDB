@@ -3,7 +3,7 @@
 Status: Active
 
 Official-source audit: `docs/reviews/OFFICIAL-DOC-AUDIT-2026-10-06.md`
-Last reviewed: 2026-10-06
+Last reviewed: 2026-10-07
 
 This is the execution plan for the research/pre-prototype phase. It supersedes ad-hoc implementation order; `docs/ROADMAP.md` remains the broader research roadmap.
 
@@ -206,18 +206,19 @@ Fault tests:
 - slow node;
 - add/drain/replace.
 
-## Progress snapshot — 2026-10-06
+## Progress snapshot — 2026-10-07
 
 - Phase 0: implementation complete locally; pending commit in this review batch.
 - Phase 1.1: complete for hash-ring / WRH / constrained-WRH comparison.
 - Phase 1.2: partial; movement, excess-join movement, replica counts, zone/rack collisions implemented.
 - Phase 1.3: partial; strong-node join and failure-domain-pressure scenarios implemented.
+- RF=2 single-node removal movement now matches a failure-domain-aware constrained lower bound exactly.
 - Tests: 32 passing.
 - First experiment: `docs/experiments/2026-10-06-placement-baseline.md`.
 - ADR-0001: still Proposed.
 - ADR-0002: still Proposed.
 
-Next priority: node-removal minimum-movement analysis, tablet resize state machine, deterministic fault events, then compact million-tablet simulation.
+Next priority: tablet resize state machine, deterministic fault events, then compact million-tablet simulation.
 
 ### Placement planner hypothesis
 

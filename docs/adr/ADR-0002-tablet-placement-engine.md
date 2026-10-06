@@ -118,7 +118,7 @@ Capacity fairness must be measured against a feasible target that accounts for:
 
 See `docs/experiments/2026-10-06-placement-baseline.md`.
 
-A quota-aware planner prototype now converges on the current join/leave/weight/failure-domain scenarios while retaining WRH only for deterministic ranking. Strong join and fourth-domain join reach the current count-based movement lower bound; node removal still has a measurable movement gap and therefore remains an open optimization problem.
+A quota-aware planner prototype now converges on the current join/leave/weight/failure-domain scenarios while retaining WRH only for deterministic ranking. Strong join and fourth-domain join reach their current movement lower bounds. The RF=2 single-node removal scenario now also reaches a failure-domain-aware constrained lower bound exactly; the previously reported 432-move gap was caused by an under-specified metric, not avoidable planner churn. General movement optimality for RF>2 and multiple simultaneous removals remains open.
 
 ## Tablet lifecycle evidence
 

@@ -37,7 +37,7 @@ pub fn plan_rebalance(
 
     let placement = placement.unwrap_or_else(|| current.clone());
     let moves = changed_replica_count(current, &placement, &cluster.tablets);
-    let movement_lower_bound = count_movement_lower_bound(current, &targets);
+    let movement_lower_bound = constrained_movement_lower_bound(cluster, current, &targets, policy);
     let movement_gap = moves.saturating_sub(movement_lower_bound);
 
     PlannerResult {
@@ -646,6 +646,98 @@ fn target_counts_match(
     })
 }
 
+fn constrained_movement_lower_bound(
+    cluster: &Cluster,
+    current: &Placement,
+    targets: &BTreeMap<NodeId, usize>,
+    policy: FailureDomainPolicy,
+) -> usize {
+    let base = count_movement_lower_bound(current, targets);
+
+    // Exact strengthening for the common RF=2 forced-removal shape:
+    // each affected tablet has one surviving replica and one lost owner.
+    // A replacement cannot be placed into the survivor's failure domain,
+    // so a target-domain deficit can exceed the number of directly usable
+    // repair slots. Every excess unit requires one additional healthy
+    // replica movement.
+    if target_replica_count(cluster) != 2 {
+        return base;
+    }
+
+    let strict_zones = policy.distinct_zones && eligible_zone_count(cluster) >= 2;
+    let mut retained = BTreeMap::<NodeId, usize>::new();
+    let mut affected = 0_usize;
+    let mut blocked_by_domain = BTreeMap::<String, usize>::new();
+
+    for tablet in &cluster.tablets {
+        let Some(replicas) = current.replicas.get(&tablet.id) else {
+            return base;
+        };
+        if replicas.len() != 2 {
+            return base;
+        }
+
+        let survivors: Vec<_> = replicas
+            .iter()
+            .copied()
+            .filter(|node_id| {
+                cluster
+                    .nodes
+                    .get(node_id)
+                    .is_some_and(|node| node.eligible())
+            })
+            .collect();
+
+        match survivors.as_slice() {
+            [a, b] => {
+                *retained.entry(*a).or_default() += 1;
+                *retained.entry(*b).or_default() += 1;
+            }
+            [survivor] => {
+                affected += 1;
+                *retained.entry(*survivor).or_default() += 1;
+                let domain = if strict_zones {
+                    cluster.nodes[survivor].zone.clone()
+                } else {
+                    survivor.to_string()
+                };
+                *blocked_by_domain.entry(domain).or_default() += 1;
+            }
+            _ => return base,
+        }
+    }
+
+    if affected == 0 {
+        return base;
+    }
+
+    let mut deficit_by_domain = BTreeMap::<String, usize>::new();
+    for (node_id, target) in targets {
+        let deficit = target.saturating_sub(retained.get(node_id).copied().unwrap_or(0));
+        if deficit == 0 {
+            continue;
+        }
+        let domain = if strict_zones {
+            cluster.nodes[node_id].zone.clone()
+        } else {
+            node_id.to_string()
+        };
+        *deficit_by_domain.entry(domain).or_default() += deficit;
+    }
+
+    let unavoidable_extra = deficit_by_domain
+        .iter()
+        .map(|(domain, deficit)| {
+            let blocked = blocked_by_domain.get(domain).copied().unwrap_or(0);
+            let directly_usable = affected.saturating_sub(blocked);
+            deficit.saturating_sub(directly_usable)
+        })
+        .max()
+        .unwrap_or(0);
+
+    base + unavoidable_extra
+}
+
 fn count_movement_lower_bound(current: &Placement, targets: &BTreeMap<NodeId, usize>) -> usize {
     let mut current_counts = BTreeMap::<NodeId, usize>::new();
     for replicas in current.replicas.values() {
@@ -765,6 +857,9 @@ mod tests {
         let planned = plan_rebalance(&after, &current, FailureDomainPolicy::HIERARCHICAL);
 
         assert!(planned.converged);
+        assert_eq!(planned.movement_lower_bound, 3_931);
+        assert_eq!(planned.moves, planned.movement_lower_bound);
+        assert_eq!(planned.movement_gap, 0);
         assert!(
             planned
                 .placement

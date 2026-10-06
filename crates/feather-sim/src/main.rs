@@ -162,7 +162,7 @@ fn run_scenario(name: &str, before: &Cluster, after: &Cluster, affected_nodes: &
         &planned.placement,
     );
     println!(
-        "planner_status,moves={},count_lower_bound={},gap={},converged={}",
+        "planner_status,moves={},movement_lower_bound={},gap={},converged={}",
         planned.moves, planned.movement_lower_bound, planned.movement_gap, planned.converged
     );
 }

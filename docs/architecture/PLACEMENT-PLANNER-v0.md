@@ -100,28 +100,30 @@ At 100,000 tablets, the prototype converges in all current join/leave/weight/dom
 
 The planner records:
 
-    count_movement_lower_bound
+    movement_lower_bound
     actual_changed_replicas
     movement_gap = actual - lower_bound
 
-The lower bound is intentionally weak: it only compares current node replica counts with target node replica counts and ignores per-tablet uniqueness and failure-domain constraints.
+The base lower bound compares current node replica counts with target counts. For the common RF=2 forced-removal shape, the simulator now strengthens that bound with a failure-domain blocking term.
 
-Therefore:
+If a tablet already retains a replica in domain D, its missing slot cannot also be assigned to D. Therefore the number of directly usable missing slots for D is bounded by:
 
-- gap = 0 is strong evidence of minimum movement for that scenario;
-- gap > 0 is a research signal, not proof of waste;
-- an exact minimum may require a constrained matching/min-cost-flow or augmenting-path model.
+    affected_tablets - affected_tablets_already_containing_D
+
+Any target-domain deficit beyond that number requires at least one additional movement of an otherwise healthy replica.
+
+This makes the current RF=2 single-removed-owner lower bound exact for the tested topology. It is not yet a general proof for RF>2 or multiple simultaneous removals.
 
 Current 10K results:
 
-| Scenario | Moves | Count lower bound | Gap |
+| Scenario | Moves | Movement lower bound | Gap |
 |---|---:|---:|---:|
 | strong heterogeneous join | 10,000 | 10,000 | 0 |
-| heterogeneous leave | 3,931 | 3,499 | 432 |
+| heterogeneous leave | 3,931 | 3,931 | 0 |
 | weight 2 -> 6 | 2,887 | 2,817 | 70 |
 | new fourth failure domain | 4,285 | 4,285 | 0 |
 
-The node-removal gap is the next important planner optimization target.
+For heterogeneous leave, the old count-only bound was 3,499. It missed 432 unavoidable moves caused by domain blocking. The planner was already optimal for that scenario; the metric was wrong.
 
 ### Planner vs migration scheduler
 
@@ -139,7 +141,7 @@ This separation is now enforced architecturally.
 
 ## Research questions
 
-- Can greedy planning converge without oscillation?
+- How should the constrained movement lower bound generalize to RF>2 and multiple simultaneous removals?
 - What is the correct domain-aware capacity target?
 - Should disk bytes and request heat be separate objective dimensions?
 - How much state must the planner hold for 1M+ tablets?
