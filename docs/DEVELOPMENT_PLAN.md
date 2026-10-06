@@ -173,6 +173,28 @@ Exit gate for ADR-0001 candidate:
 
 ## Phase 4 — deterministic event/fault engine
 
+### Phase 4 implementation status
+
+Implemented:
+
+- deterministic tick + sequence event ordering;
+- SplitMix64 seed-driven health-flap generation;
+- stable versioned text trace format;
+- trace round-trip and replay;
+- direct replay against real MigrationScheduler / Repair logic;
+- same-seed/same-trace reproducibility checks;
+- bounded health-fault convergence test.
+
+See docs/architecture/DETERMINISTIC-FAULTS-v0.md and docs/experiments/2026-10-07-deterministic-fault-replay.md.
+
+Still open:
+
+- deterministic clock abstraction shared with production-intent code;
+- Partition/Heal and packet Delay/Drop/Duplicate/Reorder;
+- disk-full/slow/corrupt I/O;
+- CPU stall;
+- 100-node topology churn campaign.
+
 Seed-driven events:
 - Crash/Restart;
 - Partition/Heal;
@@ -239,7 +261,7 @@ Fault tests:
 - ADR-0001: still Proposed.
 - ADR-0002: still Proposed.
 
-Next priority: deterministic fault events, split-boundary strategy experiments, then compact million-tablet simulation.
+Next priority: deterministic network/clock fault adapters, split-boundary strategy experiments, then compact million-tablet simulation.
 
 ### Placement planner hypothesis
 

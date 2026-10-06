@@ -1,5 +1,6 @@
 #![forbid(unsafe_code)]
 
+pub mod fault;
 mod hash;
 pub mod metrics;
 pub mod migration;
@@ -8,6 +9,8 @@ pub mod placement;
 pub mod planner;
 pub mod range_resize;
 pub mod resize;
+
+pub use fault::{FaultAction, FaultEvent, FaultReplayReport, FaultTrace, replay_migration_faults};
 
 pub use metrics::{
     JoinMovementBreakdown, PlacementMetrics, TransitionMovementBreakdown,
