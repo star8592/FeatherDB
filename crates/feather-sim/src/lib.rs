@@ -14,7 +14,7 @@ pub use metrics::{
 };
 pub use migration::{
     MigrationBudget, MigrationError, MigrationPriority, MigrationScheduler, MigrationState,
-    MigrationTask, TickReport,
+    MigrationTask, NodeHealth, TabletAvailability, TickReport,
 };
 pub use model::{AdminState, Cluster, Node, NodeId, Placement, Tablet, TabletId};
 pub use placement::{FailureDomainPolicy, PlacementStrategy};

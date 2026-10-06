@@ -138,3 +138,58 @@ Current tests verify:
 6. Model repair debt and repair-age priority.
 7. Add checksum/version validation before cutover.
 8. Integrate anti-entropy once data-version semantics exist.
+
+
+## Runtime health is not topology
+
+The simulator now keeps transient node health outside durable topology membership.
+
+Runtime health states:
+
+    Healthy
+    Suspect
+    Unavailable
+
+A node becoming Unavailable can make a tablet:
+
+    Healthy -> Degraded -> Lost
+
+without changing actual or desired ownership.
+
+Only a durable topology transition to Removed authorizes forced-loss ownership replacement.
+
+This preserves:
+
+    failure detection != durable topology authority
+
+and prevents a transient timeout from becoming an automatic destructive reshuffle.
+
+## Repair source failover
+
+If a Repair copy source becomes runtime-unavailable before copy completion:
+
+1. the task is returned to Pending;
+2. partial bytes are discarded conservatively;
+3. another healthy surviving replica is selected;
+4. the copy restarts from zero;
+5. ownership remains unchanged until the restarted copy completes.
+
+This is intentionally conservative until the storage layer can prove resumable verified chunk transfer.
+
+## Durable truth and reconstructible work
+
+Migration/Repair tasks are not currently treated as durable truth.
+
+The durable state required to reconstruct work is:
+
+    TopologyEpoch
+    Actual Tablet Map
+    Desired Tablet Map
+
+After scheduler/process restart, unfinished work is regenerated from:
+
+    actual -> desired
+
+A test verifies that a Repair interrupted after partial copy is rebuilt from the durable maps and safely converges.
+
+This keeps the control-plane state smaller and avoids a second persistent task journal unless future evidence proves it necessary.

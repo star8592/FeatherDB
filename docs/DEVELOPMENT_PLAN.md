@@ -101,15 +101,17 @@ Implemented:
 - surviving replicas rebuild lost ownership;
 - Repair is ordered ahead of Rebalance;
 - sequential recovery from one surviving replica is supported;
-- all-replica loss returns explicit NoRepairSource.
+- all-replica loss returns explicit NoRepairSource;
+- runtime health is kept separate from durable topology;
+- Repair automatically reselects a surviving copy source;
+- scheduler restart reconstructs Repair from actual/desired maps instead of persisting a second task journal.
 
 See docs/architecture/REPAIR-PATH-v0.md and docs/experiments/2026-10-07-forced-loss-repair.md.
 
 Still open:
 
-- source failover mid-copy;
 - target failure/disk-full mid-copy;
-- durable degraded-tablet state;
+- persistent degraded-repair age/debt metrics;
 - checksum/version validation;
 - later anti-entropy integration;
 - dependency ordering for blocked multi-replica transitions;
@@ -210,12 +212,12 @@ Fault tests:
 - Phase 1.1: complete for hash-ring / WRH / constrained-WRH comparison.
 - Phase 1.2: partial; movement, excess-join movement, replica counts, zone/rack collisions implemented.
 - Phase 1.3: partial; strong-node join and failure-domain-pressure scenarios implemented.
-- Tests: 27 passing.
+- Tests: 31 passing.
 - First experiment: `docs/experiments/2026-10-06-placement-baseline.md`.
 - ADR-0001: still Proposed.
 - ADR-0002: still Proposed.
 
-Next priority: repair source failover and durable degraded-tablet state, blocked-cutover dependency ordering, node-removal minimum-movement analysis, tablet resize state machine, then compact million-tablet simulation.
+Next priority: blocked-cutover dependency ordering, node-removal minimum-movement analysis, tablet resize state machine, deterministic fault events, then compact million-tablet simulation.
 
 ### Placement planner hypothesis
 

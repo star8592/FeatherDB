@@ -18,6 +18,20 @@ pub enum MigrationState {
     Stale,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum NodeHealth {
+    Healthy,
+    Suspect,
+    Unavailable,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum TabletAvailability {
+    Healthy { available: usize, total: usize },
+    Degraded { available: usize, total: usize },
+    Lost { total: usize },
+}
+
 #[derive(Clone, Debug)]
 pub struct MigrationTask {
     pub id: u64,
@@ -58,6 +72,7 @@ pub struct TickReport {
     pub started: usize,
     pub completed: usize,
     pub stale: usize,
+    pub source_failovers: usize,
     pub bytes_copied: u64,
     pub active: usize,
     pub queued: usize,
@@ -80,6 +95,7 @@ pub struct MigrationScheduler {
     budget: MigrationBudget,
     actual: Placement,
     desired: Placement,
+    health: BTreeMap<NodeId, NodeHealth>,
     tasks: Vec<MigrationTask>,
     next_task_id: u64,
     pub total_completed: usize,
@@ -94,12 +110,20 @@ impl MigrationScheduler {
         desired: Placement,
         budget: MigrationBudget,
     ) -> Result<Self, MigrationError> {
+        let health = cluster
+            .nodes
+            .keys()
+            .copied()
+            .map(|node_id| (node_id, NodeHealth::Healthy))
+            .collect();
+
         let mut scheduler = Self {
             cluster,
             policy,
             budget,
             actual,
             desired,
+            health,
             tasks: Vec::new(),
             next_task_id: 1,
             total_completed: 0,
@@ -119,6 +143,35 @@ impl MigrationScheduler {
 
     pub fn tasks(&self) -> &[MigrationTask] {
         &self.tasks
+    }
+
+    pub fn set_node_health(&mut self, node_id: NodeId, health: NodeHealth) -> bool {
+        if !self.cluster.nodes.contains_key(&node_id) {
+            return false;
+        }
+        self.health.insert(node_id, health);
+        true
+    }
+
+    pub fn node_health(&self, node_id: NodeId) -> Option<NodeHealth> {
+        self.health.get(&node_id).copied()
+    }
+
+    pub fn tablet_availability(&self, tablet_id: TabletId) -> Option<TabletAvailability> {
+        let replicas = self.actual.replicas.get(&tablet_id)?;
+        let available = replicas
+            .iter()
+            .filter(|node_id| runtime_source_readable(&self.cluster, &self.health, **node_id))
+            .count();
+        let total = replicas.len();
+
+        Some(if available == 0 {
+            TabletAvailability::Lost { total }
+        } else if available == total {
+            TabletAvailability::Healthy { available, total }
+        } else {
+            TabletAvailability::Degraded { available, total }
+        })
     }
 
     pub fn is_converged(&self) -> bool {
@@ -156,6 +209,11 @@ impl MigrationScheduler {
             .count();
 
         self.cluster = cluster;
+        self.health
+            .retain(|node_id, _| self.cluster.nodes.contains_key(node_id));
+        for node_id in self.cluster.nodes.keys() {
+            self.health.entry(*node_id).or_insert(NodeHealth::Healthy);
+        }
         self.desired = desired;
         self.tasks.clear();
         self.rebuild_tasks()
@@ -164,6 +222,7 @@ impl MigrationScheduler {
     pub fn tick(&mut self) -> TickReport {
         let mut report = TickReport::default();
 
+        self.refresh_repair_sources(&mut report);
         self.try_ready_cutovers(&mut report);
 
         let mut active_count = self.active_task_count();
@@ -195,8 +254,8 @@ impl MigrationScheduler {
                     || per_node.get(&copy_source).copied().unwrap_or(0)
                         >= self.budget.max_per_node_active
                     || per_node.get(&to).copied().unwrap_or(0) >= self.budget.max_per_node_active
-                    || !source_readable(&self.cluster, copy_source)
-                    || !target_writable(&self.cluster, to)
+                    || !runtime_source_readable(&self.cluster, &self.health, copy_source)
+                    || !runtime_target_writable(&self.cluster, &self.health, to)
                 {
                     continue;
                 }
@@ -268,6 +327,45 @@ impl MigrationScheduler {
         report
     }
 
+    fn refresh_repair_sources(&mut self, report: &mut TickReport) {
+        for index in 0..self.tasks.len() {
+            if self.tasks[index].priority != MigrationPriority::Repair
+                || matches!(
+                    self.tasks[index].state,
+                    MigrationState::Complete
+                        | MigrationState::Stale
+                        | MigrationState::ReadyToCutover
+                )
+            {
+                continue;
+            }
+
+            let current_source = self.tasks[index].copy_source;
+            if runtime_source_readable(&self.cluster, &self.health, current_source) {
+                continue;
+            }
+
+            let tablet_id = self.tasks[index].tablet_id;
+            let owner_to_replace = self.tasks[index].owner_to_replace;
+            let Some(replicas) = self.actual.replicas.get(&tablet_id) else {
+                continue;
+            };
+
+            let next_source =
+                choose_repair_source(&self.cluster, &self.health, replicas, owner_to_replace);
+
+            self.tasks[index].state = MigrationState::Pending;
+            self.tasks[index].bytes_remaining = self.tasks[index].bytes_total;
+
+            if let Some(next_source) = next_source {
+                if next_source != current_source {
+                    self.tasks[index].copy_source = next_source;
+                    report.source_failovers += 1;
+                }
+            }
+        }
+    }
+
     fn rebuild_tasks(&mut self) -> Result<(), MigrationError> {
         let mut tasks = Vec::new();
 
@@ -308,11 +406,11 @@ impl MigrationScheduler {
             }
 
             for (owner_to_replace, to) in removed.into_iter().zip(added) {
-                let (copy_source, priority) = if source_readable(&self.cluster, owner_to_replace) {
+                let (copy_source, priority) = if owner_can_stream(&self.cluster, owner_to_replace) {
                     (owner_to_replace, MigrationPriority::Rebalance)
                 } else {
                     (
-                        choose_repair_source(&self.cluster, old, owner_to_replace)
+                        choose_repair_source(&self.cluster, &self.health, old, owner_to_replace)
                             .ok_or(MigrationError::NoRepairSource(tablet.id))?,
                         MigrationPriority::Repair,
                     )
@@ -398,9 +496,14 @@ impl MigrationScheduler {
         candidate.sort_unstable();
 
         let safe = match task.priority {
-            MigrationPriority::Repair => {
-                repair_cutover_safe(&self.cluster, &current, &candidate, task.to, self.policy)
-            }
+            MigrationPriority::Repair => repair_cutover_safe(
+                &self.cluster,
+                &self.health,
+                &current,
+                &candidate,
+                task.to,
+                self.policy,
+            ),
             MigrationPriority::Rebalance => {
                 replica_set_safe(&self.cluster, &candidate, self.policy)
             }
@@ -443,6 +546,7 @@ impl MigrationScheduler {
 
 fn choose_repair_source(
     cluster: &Cluster,
+    health: &BTreeMap<NodeId, NodeHealth>,
     replicas: &[NodeId],
     owner_to_replace: NodeId,
 ) -> Option<NodeId> {
@@ -450,7 +554,7 @@ fn choose_repair_source(
         .iter()
         .copied()
         .filter(|node_id| *node_id != owner_to_replace)
-        .filter(|node_id| source_readable(cluster, *node_id))
+        .filter(|node_id| runtime_source_readable(cluster, health, *node_id))
         .collect();
 
     candidates.sort_by_key(|node_id| {
@@ -466,12 +570,13 @@ fn choose_repair_source(
 
 fn repair_cutover_safe(
     cluster: &Cluster,
+    health: &BTreeMap<NodeId, NodeHealth>,
     current: &[NodeId],
     candidate: &[NodeId],
     target: NodeId,
     policy: FailureDomainPolicy,
 ) -> bool {
-    if !target_writable(cluster, target)
+    if !runtime_target_writable(cluster, health, target)
         || candidate.iter().collect::<BTreeSet<_>>().len() != candidate.len()
     {
         return false;
@@ -479,11 +584,11 @@ fn repair_cutover_safe(
 
     let current_available = current
         .iter()
-        .filter(|node_id| source_readable(cluster, **node_id))
+        .filter(|node_id| runtime_source_readable(cluster, health, **node_id))
         .count();
     let candidate_available = candidate
         .iter()
-        .filter(|node_id| source_readable(cluster, **node_id))
+        .filter(|node_id| runtime_source_readable(cluster, health, **node_id))
         .count();
 
     if candidate_available <= current_available {
@@ -493,13 +598,13 @@ fn repair_cutover_safe(
     if policy.distinct_zones {
         let before = current
             .iter()
-            .filter(|node_id| source_readable(cluster, **node_id))
+            .filter(|node_id| runtime_source_readable(cluster, health, **node_id))
             .map(|node_id| cluster.nodes[node_id].zone.as_str())
             .collect::<BTreeSet<_>>()
             .len();
         let after = candidate
             .iter()
-            .filter(|node_id| source_readable(cluster, **node_id))
+            .filter(|node_id| runtime_source_readable(cluster, health, **node_id))
             .map(|node_id| cluster.nodes[node_id].zone.as_str())
             .collect::<BTreeSet<_>>()
             .len();
@@ -511,7 +616,7 @@ fn repair_cutover_safe(
     if policy.distinct_racks {
         let before = current
             .iter()
-            .filter(|node_id| source_readable(cluster, **node_id))
+            .filter(|node_id| runtime_source_readable(cluster, health, **node_id))
             .map(|node_id| {
                 let node = &cluster.nodes[node_id];
                 (node.zone.as_str(), node.rack.as_str())
@@ -520,7 +625,7 @@ fn repair_cutover_safe(
             .len();
         let after = candidate
             .iter()
-            .filter(|node_id| source_readable(cluster, **node_id))
+            .filter(|node_id| runtime_source_readable(cluster, health, **node_id))
             .map(|node_id| {
                 let node = &cluster.nodes[node_id];
                 (node.zone.as_str(), node.rack.as_str())
@@ -541,18 +646,44 @@ fn decrement_node(counts: &mut BTreeMap<NodeId, usize>, node_id: NodeId) {
     }
 }
 
-fn source_readable(cluster: &Cluster, node_id: NodeId) -> bool {
+fn owner_can_stream(cluster: &Cluster, node_id: NodeId) -> bool {
     cluster
         .nodes
         .get(&node_id)
         .is_some_and(|node| matches!(node.state, AdminState::Active | AdminState::Draining))
 }
 
-fn target_writable(cluster: &Cluster, node_id: NodeId) -> bool {
+fn runtime_source_readable(
+    cluster: &Cluster,
+    health: &BTreeMap<NodeId, NodeHealth>,
+    node_id: NodeId,
+) -> bool {
+    owner_can_stream(cluster, node_id)
+        && health
+            .get(&node_id)
+            .copied()
+            .unwrap_or(NodeHealth::Unavailable)
+            == NodeHealth::Healthy
+}
+
+fn topology_target_writable(cluster: &Cluster, node_id: NodeId) -> bool {
     cluster
         .nodes
         .get(&node_id)
         .is_some_and(|node| node.state == AdminState::Active)
+}
+
+fn runtime_target_writable(
+    cluster: &Cluster,
+    health: &BTreeMap<NodeId, NodeHealth>,
+    node_id: NodeId,
+) -> bool {
+    topology_target_writable(cluster, node_id)
+        && health
+            .get(&node_id)
+            .copied()
+            .unwrap_or(NodeHealth::Unavailable)
+            == NodeHealth::Healthy
 }
 
 fn replica_set_safe(cluster: &Cluster, replicas: &[NodeId], policy: FailureDomainPolicy) -> bool {
@@ -562,7 +693,7 @@ fn replica_set_safe(cluster: &Cluster, replicas: &[NodeId], policy: FailureDomai
 
     if replicas
         .iter()
-        .any(|node_id| !target_writable(cluster, *node_id))
+        .any(|node_id| !topology_target_writable(cluster, *node_id))
     {
         return false;
     }
@@ -951,6 +1082,212 @@ mod tests {
 
         assert_eq!(scheduler.actual(), &desired);
         assert!(scheduler.is_converged());
+    }
+
+    #[test]
+    fn transient_unavailability_degrades_tablet_without_changing_ownership() {
+        let cluster = one_tablet_cluster(100);
+        let placement = Placement {
+            replicas: BTreeMap::from([(1, vec![1, 2])]),
+        };
+        let mut scheduler = MigrationScheduler::new(
+            cluster,
+            FailureDomainPolicy::HIERARCHICAL,
+            placement.clone(),
+            placement.clone(),
+            MigrationBudget::conservative(),
+        )
+        .unwrap();
+
+        assert_eq!(
+            scheduler.tablet_availability(1),
+            Some(TabletAvailability::Healthy {
+                available: 2,
+                total: 2
+            })
+        );
+
+        assert!(scheduler.set_node_health(1, NodeHealth::Unavailable));
+
+        assert_eq!(
+            scheduler.tablet_availability(1),
+            Some(TabletAvailability::Degraded {
+                available: 1,
+                total: 2
+            })
+        );
+        assert_eq!(scheduler.actual(), &placement);
+        assert_eq!(scheduler.desired(), &placement);
+        assert!(scheduler.tasks().is_empty());
+    }
+
+    #[test]
+    fn repair_source_failover_restarts_copy_from_survivor() {
+        let cluster = Cluster {
+            epoch: 1,
+            replication_factor: 3,
+            nodes: [
+                node(1, AdminState::Removed, "a"),
+                node(2, AdminState::Active, "b"),
+                node(3, AdminState::Active, "c"),
+                node(4, AdminState::Active, "d"),
+            ]
+            .into_iter()
+            .map(|node| (node.id, node))
+            .collect(),
+            tablets: vec![Tablet { id: 1, bytes: 100 }],
+        };
+        let actual = Placement {
+            replicas: BTreeMap::from([(1, vec![1, 2, 3])]),
+        };
+        let desired = Placement {
+            replicas: BTreeMap::from([(1, vec![2, 3, 4])]),
+        };
+        let budget = MigrationBudget {
+            max_active: 1,
+            max_per_node_active: 1,
+            bytes_per_tick: 40,
+            max_bytes_per_node_per_tick: 40,
+            max_bytes_per_task_per_tick: 40,
+        };
+        let mut scheduler = MigrationScheduler::new(
+            cluster,
+            FailureDomainPolicy::HIERARCHICAL,
+            actual,
+            desired.clone(),
+            budget,
+        )
+        .unwrap();
+
+        assert_eq!(scheduler.tasks()[0].copy_source, 2);
+        let first = scheduler.tick();
+        assert_eq!(first.bytes_copied, 40);
+        assert_eq!(scheduler.tasks()[0].bytes_remaining, 60);
+
+        assert!(scheduler.set_node_health(2, NodeHealth::Unavailable));
+        assert_eq!(
+            scheduler.tablet_availability(1),
+            Some(TabletAvailability::Degraded {
+                available: 1,
+                total: 3
+            })
+        );
+
+        let failover = scheduler.tick();
+        assert_eq!(failover.source_failovers, 1);
+        assert_eq!(scheduler.tasks()[0].copy_source, 3);
+        assert_eq!(failover.bytes_copied, 40);
+        assert_eq!(scheduler.tasks()[0].bytes_remaining, 60);
+
+        for _ in 0..4 {
+            if scheduler.is_converged() {
+                break;
+            }
+            scheduler.tick();
+        }
+
+        assert_eq!(scheduler.actual(), &desired);
+        assert!(scheduler.is_converged());
+        assert_eq!(
+            scheduler.tablet_availability(1),
+            Some(TabletAvailability::Degraded {
+                available: 2,
+                total: 3
+            })
+        );
+    }
+
+    #[test]
+    fn all_runtime_replicas_unavailable_is_lost_but_topology_is_unchanged() {
+        let cluster = one_tablet_cluster(100);
+        let placement = Placement {
+            replicas: BTreeMap::from([(1, vec![1, 2])]),
+        };
+        let mut scheduler = MigrationScheduler::new(
+            cluster,
+            FailureDomainPolicy::HIERARCHICAL,
+            placement.clone(),
+            placement.clone(),
+            MigrationBudget::conservative(),
+        )
+        .unwrap();
+
+        scheduler.set_node_health(1, NodeHealth::Unavailable);
+        scheduler.set_node_health(2, NodeHealth::Unavailable);
+
+        assert_eq!(
+            scheduler.tablet_availability(1),
+            Some(TabletAvailability::Lost { total: 2 })
+        );
+        assert_eq!(scheduler.actual(), &placement);
+        assert_eq!(scheduler.desired(), &placement);
+    }
+
+    #[test]
+    fn scheduler_restart_reconstructs_repair_from_durable_maps() {
+        let cluster = Cluster {
+            epoch: 9,
+            replication_factor: 3,
+            nodes: [
+                node(1, AdminState::Removed, "a"),
+                node(2, AdminState::Active, "b"),
+                node(3, AdminState::Active, "c"),
+                node(4, AdminState::Active, "d"),
+            ]
+            .into_iter()
+            .map(|node| (node.id, node))
+            .collect(),
+            tablets: vec![Tablet { id: 1, bytes: 100 }],
+        };
+        let actual = Placement {
+            replicas: BTreeMap::from([(1, vec![1, 2, 3])]),
+        };
+        let desired = Placement {
+            replicas: BTreeMap::from([(1, vec![2, 3, 4])]),
+        };
+        let budget = MigrationBudget {
+            max_active: 1,
+            max_per_node_active: 1,
+            bytes_per_tick: 40,
+            max_bytes_per_node_per_tick: 40,
+            max_bytes_per_task_per_tick: 40,
+        };
+
+        let mut first = MigrationScheduler::new(
+            cluster.clone(),
+            FailureDomainPolicy::HIERARCHICAL,
+            actual.clone(),
+            desired.clone(),
+            budget,
+        )
+        .unwrap();
+
+        first.tick();
+        assert_eq!(first.tasks()[0].bytes_remaining, 60);
+        assert_eq!(first.actual(), &actual);
+
+        let mut restarted = MigrationScheduler::new(
+            cluster,
+            FailureDomainPolicy::HIERARCHICAL,
+            first.actual().clone(),
+            desired.clone(),
+            budget,
+        )
+        .unwrap();
+
+        assert_eq!(restarted.tasks().len(), 1);
+        assert_eq!(restarted.tasks()[0].priority, MigrationPriority::Repair);
+        assert_eq!(restarted.tasks()[0].bytes_remaining, 100);
+
+        for _ in 0..4 {
+            if restarted.is_converged() {
+                break;
+            }
+            restarted.tick();
+        }
+
+        assert_eq!(restarted.actual(), &desired);
+        assert!(restarted.is_converged());
     }
 
     #[test]
