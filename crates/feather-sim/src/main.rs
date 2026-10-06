@@ -2,7 +2,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use feather_sim::{
     AdminState, Cluster, FailureDomainPolicy, Node, PlacementMetrics, PlacementStrategy, Tablet,
-    movement_ratio, transition_movement_breakdown,
+    movement_ratio, plan_rebalance, transition_movement_breakdown,
 };
 
 fn node(id: u64, weight: u32, zone: &str, rack: &str) -> Node {
@@ -90,8 +90,43 @@ fn domain_pressure_scenario(tablet_count: u64) -> (Cluster, Cluster, BTreeSet<u6
     (before, after, BTreeSet::from([7]))
 }
 
+fn print_result(
+    label: &str,
+    before: &Cluster,
+    after: &Cluster,
+    affected_nodes: &BTreeSet<u64>,
+    old: &feather_sim::Placement,
+    new: &feather_sim::Placement,
+) {
+    let metrics = PlacementMetrics::calculate(after, new);
+    let movement = movement_ratio(old, new, &after.tablets, before.replication_factor);
+    let transition = transition_movement_breakdown(old, new, &after.tablets, affected_nodes);
+    let zone_error = metrics
+        .max_zone_aware_capacity_inclusion_error
+        .map(|value| format!("{value:.6}"))
+        .unwrap_or_else(|| "n/a".into());
+
+    println!(
+        "{label},{movement:.6},{},{},{},{:.6},{zone_error},{:?}",
+        transition.excess_changed_tablets,
+        metrics.zone_collisions,
+        metrics.rack_collisions,
+        metrics.max_capacity_inclusion_error,
+        metrics.replica_counts
+    );
+}
+
 fn run_scenario(name: &str, before: &Cluster, after: &Cluster, affected_nodes: &BTreeSet<u64>) {
-    let experiments = [
+    println!(
+        "scenario={name} tablets={} rf={}",
+        before.tablets.len(),
+        before.replication_factor
+    );
+    println!(
+        "strategy,movement_ratio,excess_changed_tablets,zone_collisions,rack_collisions,max_capacity_error,max_zone_aware_error,replica_counts"
+    );
+
+    for (strategy, policy, label) in [
         (
             PlacementStrategy::HashRing {
                 virtual_nodes_per_weight: 64,
@@ -109,37 +144,32 @@ fn run_scenario(name: &str, before: &Cluster, after: &Cluster, affected_nodes: &
             FailureDomainPolicy::HIERARCHICAL,
             "constrained-wrh",
         ),
-    ];
-
-    println!(
-        "scenario={name} tablets={} rf={}",
-        before.tablets.len(),
-        before.replication_factor
-    );
-    println!(
-        "strategy,movement_ratio,excess_changed_tablets,zone_collisions,rack_collisions,max_capacity_error,max_zone_aware_error,replica_counts"
-    );
-
-    for (strategy, policy, label) in experiments {
+    ] {
         let old = strategy.place(before, policy);
         let new = strategy.place(after, policy);
-        let metrics = PlacementMetrics::calculate(after, &new);
-        let movement = movement_ratio(&old, &new, &after.tablets, before.replication_factor);
-        let transition = transition_movement_breakdown(&old, &new, &after.tablets, affected_nodes);
-        let zone_error = metrics
-            .max_zone_aware_capacity_inclusion_error
-            .map(|value| format!("{value:.6}"))
-            .unwrap_or_else(|| "n/a".into());
-
-        println!(
-            "{label},{movement:.6},{},{},{},{:.6},{zone_error},{:?}",
-            transition.excess_changed_tablets,
-            metrics.zone_collisions,
-            metrics.rack_collisions,
-            metrics.max_capacity_inclusion_error,
-            metrics.replica_counts
-        );
+        print_result(label, before, after, affected_nodes, &old, &new);
     }
+
+    let current = PlacementStrategy::WeightedRendezvous
+        .place(before, FailureDomainPolicy::HIERARCHICAL);
+    let planned = plan_rebalance(
+        after,
+        &current,
+        FailureDomainPolicy::HIERARCHICAL,
+        usize::MAX,
+    );
+    print_result(
+        "stateful-planner",
+        before,
+        after,
+        affected_nodes,
+        &current,
+        &planned.placement,
+    );
+    println!(
+        "planner_status,moves={},converged={}",
+        planned.moves, planned.converged
+    );
 }
 
 fn main() {
