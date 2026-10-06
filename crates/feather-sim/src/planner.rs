@@ -4,7 +4,7 @@ use crate::hash::{hash_pair, unit_interval_open};
 use crate::metrics::{
     feasible_capacity_inclusion_targets, zone_aware_capacity_inclusion_targets,
 };
-use crate::model::{Cluster, NodeId, Placement, TabletId};
+use crate::model::{Cluster, Node, NodeId, Placement, Tablet, TabletId};
 use crate::placement::FailureDomainPolicy;
 
 #[derive(Clone, Debug)]
@@ -18,112 +18,21 @@ pub fn plan_rebalance(
     cluster: &Cluster,
     current: &Placement,
     policy: FailureDomainPolicy,
-    max_moves: usize,
 ) -> PlannerResult {
-    let mut placement = current.clone();
     let targets = integer_target_counts(cluster, policy);
-    let mut counts = replica_counts(&placement);
+    let placement = if policy.distinct_zones && eligible_zone_count(cluster) >= target_replica_count(cluster)
+    {
+        plan_with_zone_quotas(cluster, current, &targets)
+    } else {
+        plan_with_node_quotas(cluster, current, &targets, policy)
+    };
 
-    for node_id in cluster.nodes.keys() {
-        counts.entry(*node_id).or_default();
-    }
+    let converged = placement
+        .as_ref()
+        .is_some_and(|placement| target_counts_match(cluster, placement, &targets));
 
-    let mut moves = 0usize;
-    let mut made_progress = true;
-
-    while made_progress && moves < max_moves {
-        made_progress = false;
-
-        for tablet in &cluster.tablets {
-            if moves >= max_moves {
-                break;
-            }
-
-            let Some(replicas) = placement.replicas.get(&tablet.id).cloned() else {
-                continue;
-            };
-
-            let mut sources: Vec<_> = replicas
-                .iter()
-                .copied()
-                .filter(|node_id| {
-                    let eligible = cluster
-                        .nodes
-                        .get(node_id)
-                        .is_some_and(|node| node.eligible());
-                    !eligible
-                        || counts.get(node_id).copied().unwrap_or(0)
-                            > targets.get(node_id).copied().unwrap_or(0)
-                })
-                .collect();
-
-            sources.sort_by(|a, b| {
-                overload(*b, &counts, &targets)
-                    .cmp(&overload(*a, &counts, &targets))
-                    .then_with(|| a.cmp(b))
-            });
-
-            for source in sources {
-                let mut candidates: Vec<_> = cluster
-                    .nodes
-                    .values()
-                    .filter(|node| node.eligible())
-                    .filter(|node| !replicas.contains(&node.id))
-                    .filter(|node| {
-                        counts.get(&node.id).copied().unwrap_or(0)
-                            < targets.get(&node.id).copied().unwrap_or(0)
-                    })
-                    .filter(|node| {
-                        replacement_respects_policy(
-                            cluster,
-                            &replicas,
-                            source,
-                            node.id,
-                            policy,
-                        )
-                    })
-                    .map(|node| {
-                        (
-                            deficit(node.id, &counts, &targets),
-                            wrh_score(tablet.id, node.id, node.weight),
-                            node.id,
-                        )
-                    })
-                    .collect();
-
-                candidates.sort_by(|a, b| {
-                    b.0.cmp(&a.0)
-                        .then_with(|| b.1.total_cmp(&a.1))
-                        .then_with(|| a.2.cmp(&b.2))
-                });
-
-                let Some((_, _, target)) = candidates.first().copied() else {
-                    continue;
-                };
-
-                let updated = placement
-                    .replicas
-                    .get_mut(&tablet.id)
-                    .expect("tablet disappeared");
-                let slot = updated
-                    .iter_mut()
-                    .find(|node_id| **node_id == source)
-                    .expect("source replica disappeared");
-                *slot = target;
-                updated.sort_unstable();
-
-                *counts.entry(source).or_default() -= 1;
-                *counts.entry(target).or_default() += 1;
-                moves += 1;
-                made_progress = true;
-                break;
-            }
-        }
-    }
-
-    let converged = counts.iter().all(|(node_id, count)| {
-        *count == targets.get(node_id).copied().unwrap_or(0)
-    });
+    let placement = placement.unwrap_or_else(|| current.clone());
+    let moves = changed_replica_count(current, &placement, &cluster.tablets);
 
     PlannerResult {
         placement,
@@ -132,14 +41,349 @@ pub fn plan_rebalance(
     }
 }
 
-fn replica_counts(placement: &Placement) -> BTreeMap<NodeId, usize> {
-    let mut counts = BTreeMap::new();
-    for replicas in placement.replicas.values() {
-        for node_id in replicas {
-            *counts.entry(*node_id).or_default() += 1;
+fn target_replica_count(cluster: &Cluster) -> usize {
+    cluster
+        .replication_factor
+        .min(cluster.eligible_node_count())
+}
+
+fn eligible_zone_count(cluster: &Cluster) -> usize {
+    cluster
+        .nodes
+        .values()
+        .filter(|node| node.eligible())
+        .map(|node| node.zone.as_str())
+        .collect::<BTreeSet<_>>()
+        .len()
+}
+
+fn plan_with_zone_quotas(
+    cluster: &Cluster,
+    current: &Placement,
+    targets: &BTreeMap<NodeId, usize>,
+) -> Option<Placement> {
+    let rf = target_replica_count(cluster);
+    let tablet_count = cluster.tablets.len();
+    let mut node_remaining = targets.clone();
+    let mut zone_remaining = BTreeMap::<String, usize>::new();
+
+    for (node_id, target) in targets {
+        let node = cluster.nodes.get(node_id)?;
+        *zone_remaining.entry(node.zone.clone()).or_default() += *target;
+    }
+
+    let mut placement = Placement::default();
+
+    for (index, tablet) in cluster.tablets.iter().enumerate() {
+        let tablets_left = tablet_count - index;
+        let old = current
+            .replicas
+            .get(&tablet.id)
+            .map(Vec::as_slice)
+            .unwrap_or(&[]);
+
+        let mut selected_zones = Vec::<String>::new();
+
+        let mut forced_zones: Vec<_> = zone_remaining
+            .iter()
+            .filter(|(_, remaining)| **remaining == tablets_left && **remaining > 0)
+            .map(|(zone, _)| zone.clone())
+            .collect();
+        forced_zones.sort();
+
+        if forced_zones.len() > rf {
+            return None;
+        }
+        selected_zones.extend(forced_zones);
+
+        let mut current_zones: Vec<_> = old
+            .iter()
+            .filter_map(|node_id| cluster.nodes.get(node_id))
+            .filter(|node| node.eligible())
+            .map(|node| node.zone.clone())
+            .filter(|zone| {
+                zone_remaining.get(zone).copied().unwrap_or(0) > 0
+                    && !selected_zones.contains(zone)
+            })
+            .collect();
+        current_zones.sort();
+        current_zones.dedup();
+        current_zones.sort_by(|a, b| {
+            zone_remaining
+                .get(b)
+                .copied()
+                .unwrap_or(0)
+                .cmp(&zone_remaining.get(a).copied().unwrap_or(0))
+                .then_with(|| a.cmp(b))
+        });
+
+        for zone in current_zones {
+            if selected_zones.len() == rf {
+                break;
+            }
+            selected_zones.push(zone);
+        }
+
+        if selected_zones.len() < rf {
+            let mut other_zones: Vec<_> = zone_remaining
+                .iter()
+                .filter(|(zone, remaining)| {
+                    **remaining > 0 && !selected_zones.contains(zone)
+                })
+                .map(|(zone, remaining)| {
+                    (
+                        *remaining,
+                        zone_best_wrh_score(cluster, tablet.id, zone, &node_remaining),
+                        zone.clone(),
+                    )
+                })
+                .collect();
+
+            other_zones.sort_by(|a, b| {
+                b.0.cmp(&a.0)
+                    .then_with(|| b.1.total_cmp(&a.1))
+                    .then_with(|| a.2.cmp(&b.2))
+            });
+
+            for (_, _, zone) in other_zones {
+                if selected_zones.len() == rf {
+                    break;
+                }
+                selected_zones.push(zone);
+            }
+        }
+
+        if selected_zones.len() != rf {
+            return None;
+        }
+
+        let mut replicas = Vec::with_capacity(rf);
+        for zone in selected_zones {
+            let zone_total_before = zone_remaining.get(&zone).copied().unwrap_or(0);
+            if zone_total_before == 0 {
+                return None;
+            }
+
+            let forced_node = cluster
+                .nodes
+                .values()
+                .filter(|node| node.eligible() && node.zone == zone)
+                .filter(|node| {
+                    node_remaining.get(&node.id).copied().unwrap_or(0) == zone_total_before
+                        && zone_total_before > 0
+                })
+                .map(|node| node.id)
+                .min();
+
+            let target = if let Some(node_id) = forced_node {
+                node_id
+            } else {
+                choose_node_in_zone(
+                    cluster,
+                    tablet.id,
+                    &zone,
+                    old,
+                    &node_remaining,
+                )?
+            };
+
+            replicas.push(target);
+            *node_remaining.get_mut(&target)? -= 1;
+            *zone_remaining.get_mut(&zone)? -= 1;
+        }
+
+        replicas.sort_unstable();
+        placement.replicas.insert(tablet.id, replicas);
+    }
+
+    if node_remaining.values().any(|remaining| *remaining != 0)
+        || zone_remaining.values().any(|remaining| *remaining != 0)
+    {
+        return None;
+    }
+
+    Some(placement)
+}
+
+fn choose_node_in_zone(
+    cluster: &Cluster,
+    tablet_id: TabletId,
+    zone: &str,
+    old: &[NodeId],
+    node_remaining: &BTreeMap<NodeId, usize>,
+) -> Option<NodeId> {
+    let mut candidates: Vec<_> = cluster
+        .nodes
+        .values()
+        .filter(|node| node.eligible() && node.zone == zone)
+        .filter(|node| node_remaining.get(&node.id).copied().unwrap_or(0) > 0)
+        .map(|node| {
+            (
+                usize::from(old.contains(&node.id)),
+                node_remaining.get(&node.id).copied().unwrap_or(0),
+                wrh_score(tablet_id, node),
+                node.id,
+            )
+        })
+        .collect();
+
+    candidates.sort_by(|a, b| {
+        b.0.cmp(&a.0)
+            .then_with(|| b.1.cmp(&a.1))
+            .then_with(|| b.2.total_cmp(&a.2))
+            .then_with(|| a.3.cmp(&b.3))
+    });
+
+    candidates.first().map(|candidate| candidate.3)
+}
+
+fn zone_best_wrh_score(
+    cluster: &Cluster,
+    tablet_id: TabletId,
+    zone: &str,
+    node_remaining: &BTreeMap<NodeId, usize>,
+) -> f64 {
+    cluster
+        .nodes
+        .values()
+        .filter(|node| node.eligible() && node.zone == zone)
+        .filter(|node| node_remaining.get(&node.id).copied().unwrap_or(0) > 0)
+        .map(|node| wrh_score(tablet_id, node))
+        .fold(f64::NEG_INFINITY, f64::max)
+}
+
+fn plan_with_node_quotas(
+    cluster: &Cluster,
+    current: &Placement,
+    targets: &BTreeMap<NodeId, usize>,
+    policy: FailureDomainPolicy,
+) -> Option<Placement> {
+    let rf = target_replica_count(cluster);
+    let tablet_count = cluster.tablets.len();
+    let mut remaining = targets.clone();
+    let mut placement = Placement::default();
+
+    for (index, tablet) in cluster.tablets.iter().enumerate() {
+        let tablets_left = tablet_count - index;
+        let old = current
+            .replicas
+            .get(&tablet.id)
+            .map(Vec::as_slice)
+            .unwrap_or(&[]);
+
+        let mut selected = Vec::with_capacity(rf);
+
+        let mut forced: Vec<_> = remaining
+            .iter()
+            .filter(|(_, count)| **count == tablets_left && **count > 0)
+            .map(|(node_id, _)| *node_id)
+            .collect();
+        forced.sort_unstable();
+
+        if forced.len() > rf {
+            return None;
+        }
+
+        for node_id in forced {
+            if node_allowed(cluster, &selected, node_id, policy) {
+                selected.push(node_id);
+            } else {
+                return None;
+            }
+        }
+
+        let mut candidates: Vec<_> = cluster
+            .nodes
+            .values()
+            .filter(|node| node.eligible())
+            .filter(|node| !selected.contains(&node.id))
+            .filter(|node| remaining.get(&node.id).copied().unwrap_or(0) > 0)
+            .map(|node| {
+                (
+                    usize::from(old.contains(&node.id)),
+                    remaining.get(&node.id).copied().unwrap_or(0),
+                    wrh_score(tablet.id, node),
+                    node.id,
+                )
+            })
+            .collect();
+
+        candidates.sort_by(|a, b| {
+            b.0.cmp(&a.0)
+                .then_with(|| b.1.cmp(&a.1))
+                .then_with(|| b.2.total_cmp(&a.2))
+                .then_with(|| a.3.cmp(&b.3))
+        });
+
+        for (_, _, _, node_id) in candidates {
+            if selected.len() == rf {
+                break;
+            }
+            if node_allowed(cluster, &selected, node_id, policy) {
+                selected.push(node_id);
+            }
+        }
+
+        if selected.len() != rf {
+            return None;
+        }
+
+        selected.sort_unstable();
+        for node_id in &selected {
+            *remaining.get_mut(node_id)? -= 1;
+        }
+        placement.replicas.insert(tablet.id, selected);
+    }
+
+    if remaining.values().any(|remaining| *remaining != 0) {
+        return None;
+    }
+
+    Some(placement)
+}
+
+fn node_allowed(
+    cluster: &Cluster,
+    selected: &[NodeId],
+    candidate: NodeId,
+    policy: FailureDomainPolicy,
+) -> bool {
+    if selected.contains(&candidate) {
+        return false;
+    }
+
+    let node = &cluster.nodes[&candidate];
+
+    if policy.distinct_zones && eligible_zone_count(cluster) >= target_replica_count(cluster) {
+        if selected
+            .iter()
+            .any(|node_id| cluster.nodes[node_id].zone == node.zone)
+        {
+            return false;
         }
     }
-    counts
+
+    if policy.distinct_racks {
+        let rack = (node.zone.as_str(), node.rack.as_str());
+        let eligible_racks = cluster
+            .nodes
+            .values()
+            .filter(|node| node.eligible())
+            .map(|node| (node.zone.as_str(), node.rack.as_str()))
+            .collect::<BTreeSet<_>>()
+            .len();
+
+        if eligible_racks >= target_replica_count(cluster)
+            && selected.iter().any(|node_id| {
+                let other = &cluster.nodes[node_id];
+                (other.zone.as_str(), other.rack.as_str()) == rack
+            })
+        {
+            return false;
+        }
+    }
+
+    true
 }
 
 fn integer_target_counts(
@@ -154,8 +398,7 @@ fn integer_target_counts(
     };
 
     let tablet_count = cluster.tablets.len();
-    let total_slots = tablet_count
-        .saturating_mul(cluster.replication_factor.min(cluster.eligible_node_count()));
+    let total_slots = tablet_count.saturating_mul(target_replica_count(cluster));
 
     let mut result = BTreeMap::new();
     let mut remainders = Vec::new();
@@ -184,96 +427,56 @@ fn integer_target_counts(
     result
 }
 
-fn overload(
-    node_id: NodeId,
-    counts: &BTreeMap<NodeId, usize>,
-    targets: &BTreeMap<NodeId, usize>,
-) -> usize {
-    counts
-        .get(&node_id)
-        .copied()
-        .unwrap_or(0)
-        .saturating_sub(targets.get(&node_id).copied().unwrap_or(0))
-}
-
-fn deficit(
-    node_id: NodeId,
-    counts: &BTreeMap<NodeId, usize>,
-    targets: &BTreeMap<NodeId, usize>,
-) -> usize {
-    targets
-        .get(&node_id)
-        .copied()
-        .unwrap_or(0)
-        .saturating_sub(counts.get(&node_id).copied().unwrap_or(0))
-}
-
-fn wrh_score(tablet_id: TabletId, node_id: NodeId, weight: u32) -> f64 {
-    let u = unit_interval_open(hash_pair(tablet_id, node_id));
-    -(weight as f64) / u.ln()
-}
-
-fn replacement_respects_policy(
+fn target_counts_match(
     cluster: &Cluster,
-    replicas: &[NodeId],
-    source: NodeId,
-    target: NodeId,
-    policy: FailureDomainPolicy,
+    placement: &Placement,
+    targets: &BTreeMap<NodeId, usize>,
 ) -> bool {
-    let mut candidate = replicas.to_vec();
-    let Some(slot) = candidate.iter_mut().find(|node_id| **node_id == source) else {
-        return false;
-    };
-    *slot = target;
-
-    if candidate.iter().collect::<BTreeSet<_>>().len() != candidate.len() {
-        return false;
-    }
-
-    if policy.distinct_zones {
-        let eligible_zone_count = cluster
-            .nodes
-            .values()
-            .filter(|node| node.eligible())
-            .map(|node| node.zone.as_str())
-            .collect::<BTreeSet<_>>()
-            .len();
-
-        if eligible_zone_count >= candidate.len() {
-            let zones = candidate
-                .iter()
-                .map(|node_id| cluster.nodes[node_id].zone.as_str())
-                .collect::<BTreeSet<_>>();
-            if zones.len() != candidate.len() {
-                return false;
-            }
+    let mut counts = BTreeMap::<NodeId, usize>::new();
+    for replicas in placement.replicas.values() {
+        if replicas.len() != target_replica_count(cluster) {
+            return false;
+        }
+        if replicas.iter().collect::<BTreeSet<_>>().len() != replicas.len() {
+            return false;
+        }
+        for node_id in replicas {
+            *counts.entry(*node_id).or_default() += 1;
         }
     }
 
-    if policy.distinct_racks {
-        let eligible_rack_count = cluster
-            .nodes
-            .values()
-            .filter(|node| node.eligible())
-            .map(|node| (node.zone.as_str(), node.rack.as_str()))
-            .collect::<BTreeSet<_>>()
-            .len();
+    cluster.nodes.keys().all(|node_id| {
+        counts.get(node_id).copied().unwrap_or(0)
+            == targets.get(node_id).copied().unwrap_or(0)
+    })
+}
 
-        if eligible_rack_count >= candidate.len() {
-            let racks = candidate
-                .iter()
-                .map(|node_id| {
-                    let node = &cluster.nodes[node_id];
-                    (node.zone.as_str(), node.rack.as_str())
-                })
-                .collect::<BTreeSet<_>>();
-            if racks.len() != candidate.len() {
-                return false;
-            }
-        }
-    }
+fn changed_replica_count(
+    before: &Placement,
+    after: &Placement,
+    tablets: &[Tablet],
+) -> usize {
+    tablets
+        .iter()
+        .map(|tablet| {
+            let old = before
+                .replicas
+                .get(&tablet.id)
+                .map(Vec::as_slice)
+                .unwrap_or(&[]);
+            let new = after
+                .replicas
+                .get(&tablet.id)
+                .map(Vec::as_slice)
+                .unwrap_or(&[]);
+            new.iter().filter(|node_id| !old.contains(node_id)).count()
+        })
+        .sum()
+}
 
-    true
+fn wrh_score(tablet_id: TabletId, node: &Node) -> f64 {
+    let u = unit_interval_open(hash_pair(tablet_id, node.id));
+    -(node.weight as f64) / u.ln()
 }
 
 #[cfg(test)]
@@ -295,6 +498,75 @@ mod tests {
         }
     }
 
+    fn tablets(count: u64) -> Vec<Tablet> {
+        (0..count).map(|id| Tablet { id, bytes: 1 }).collect()
+    }
+
+    #[test]
+    fn planner_converges_strong_join_exactly() {
+        let before = Cluster {
+            epoch: 1,
+            replication_factor: 2,
+            nodes: [
+                node(1, 1, "a", "r1"),
+                node(2, 2, "b", "r1"),
+                node(3, 4, "c", "r1"),
+            ]
+            .into_iter()
+            .map(|node| (node.id, node))
+            .collect::<BTreeMap<_, _>>(),
+            tablets: tablets(10_000),
+        };
+        let current = PlacementStrategy::WeightedRendezvous
+            .place(&before, FailureDomainPolicy::HIERARCHICAL);
+
+        let mut after = before.clone();
+        after.epoch = 2;
+        after.nodes.insert(4, node(4, 8, "d", "r1"));
+
+        let planned = plan_rebalance(&after, &current, FailureDomainPolicy::HIERARCHICAL);
+        let metrics = PlacementMetrics::calculate(&after, &planned.placement);
+
+        assert!(planned.converged);
+        assert_eq!(planned.moves, 10_000);
+        assert_eq!(metrics.zone_collisions, 0);
+        assert!(metrics.max_zone_aware_capacity_inclusion_error.unwrap() < 0.001);
+    }
+
+    #[test]
+    fn planner_eliminates_removed_node() {
+        let before = Cluster {
+            epoch: 1,
+            replication_factor: 2,
+            nodes: [
+                node(1, 1, "a", "r1"),
+                node(2, 2, "b", "r1"),
+                node(3, 4, "c", "r1"),
+                node(4, 8, "d", "r1"),
+            ]
+            .into_iter()
+            .map(|node| (node.id, node))
+            .collect::<BTreeMap<_, _>>(),
+            tablets: tablets(10_000),
+        };
+        let current = PlacementStrategy::WeightedRendezvous
+            .place(&before, FailureDomainPolicy::HIERARCHICAL);
+
+        let mut after = before.clone();
+        after.nodes.get_mut(&2).unwrap().state = AdminState::Removed;
+
+        let planned = plan_rebalance(&after, &current, FailureDomainPolicy::HIERARCHICAL);
+
+        assert!(planned.converged);
+        assert!(
+            planned
+                .placement
+                .replicas
+                .values()
+                .all(|replicas| !replicas.contains(&2))
+        );
+    }
+
     #[test]
     fn planner_improves_domain_aware_balance_without_zone_collisions() {
         let before = Cluster {
@@ -311,9 +583,7 @@ mod tests {
             .into_iter()
             .map(|node| (node.id, node))
             .collect::<BTreeMap<_, _>>(),
-            tablets: (0..10_000)
-                .map(|id| Tablet { id, bytes: 1 })
-                .collect(),
+            tablets: tablets(10_000),
         };
 
         let current = PlacementStrategy::WeightedRendezvous
@@ -323,43 +593,38 @@ mod tests {
         after.epoch = 2;
         after.nodes.insert(7, node(7, 1, "d", "r1"));
 
-        let planned = plan_rebalance(
-            &after,
-            &current,
-            FailureDomainPolicy::HIERARCHICAL,
-            usize::MAX,
-        );
+        let planned = plan_rebalance(&after, &current, FailureDomainPolicy::HIERARCHICAL);
         let metrics = PlacementMetrics::calculate(&after, &planned.placement);
 
         assert_eq!(metrics.zone_collisions, 0);
-        assert!(
-            metrics
-                .max_zone_aware_capacity_inclusion_error
-                .unwrap()
-                < 0.001
-        );
+        assert!(metrics.max_zone_aware_capacity_inclusion_error.unwrap() < 0.001);
         assert!(planned.converged);
     }
 
     #[test]
-    fn planner_respects_move_budget() {
-        let before = Cluster {
+    fn planner_is_deterministic() {
+        let cluster = Cluster {
             epoch: 1,
-            replication_factor: 1,
-            nodes: [node(1, 1, "a", "r1"), node(2, 1, "b", "r1")]
-                .into_iter()
-                .map(|node| (node.id, node))
-                .collect(),
-            tablets: (0..100).map(|id| Tablet { id, bytes: 1 }).collect(),
+            replication_factor: 2,
+            nodes: [
+                node(1, 1, "a", "r1"),
+                node(2, 2, "b", "r1"),
+                node(3, 4, "c", "r1"),
+                node(4, 8, "d", "r1"),
+            ]
+            .into_iter()
+            .map(|node| (node.id, node))
+            .collect(),
+            tablets: tablets(1_000),
         };
-        let current =
-            PlacementStrategy::WeightedRendezvous.place(&before, FailureDomainPolicy::NONE);
+        let current = PlacementStrategy::WeightedRendezvous
+            .place(&cluster, FailureDomainPolicy::HIERARCHICAL);
 
-        let mut after = before.clone();
-        after.nodes.insert(3, node(3, 10, "c", "r1"));
+        let a = plan_rebalance(&cluster, &current, FailureDomainPolicy::HIERARCHICAL);
+        let b = plan_rebalance(&cluster, &current, FailureDomainPolicy::HIERARCHICAL);
 
-        let planned = plan_rebalance(&after, &current, FailureDomainPolicy::NONE, 7);
-        assert_eq!(planned.moves, 7);
-        assert!(!planned.converged);
+        assert_eq!(a.placement, b.placement);
+        assert_eq!(a.moves, b.moves);
+        assert_eq!(a.converged, b.converged);
     }
 }
