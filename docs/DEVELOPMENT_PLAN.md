@@ -85,6 +85,14 @@ Implemented research comparison:
 
 Result: no single boundary strategy dominates both byte and heat objectives. Midpoint remains the deterministic fallback; data-aware strategies stay explicit policy candidates.
 
+Multi-objective split-boundary policy implemented:
+
+- byte/heat weighting;
+- hard byte/heat imbalance limits;
+- telemetry-confidence gate;
+- minimum-improvement gate;
+- explicit fallback reason.
+
 See docs/experiments/2026-10-07-split-boundary.md.
 
 ### Physical range-resize implementation status
@@ -276,7 +284,7 @@ Fault tests:
 - ADR-0001: still Proposed.
 - ADR-0002: still Proposed.
 
-Next priority: deterministic network/clock fault adapters, multi-objective split-boundary policy, then compact million-tablet simulation.
+Next priority: deterministic network/clock fault adapters, compact million-tablet simulation, then production-substrate benchmarks.
 
 ### Placement planner hypothesis
 

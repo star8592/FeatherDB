@@ -1,4 +1,7 @@
-use feather_sim::{RangeLoadSample, SplitBoundaryStrategy, choose_split_boundary};
+use feather_sim::{
+    RangeLoadSample, SplitBoundaryPolicy, SplitBoundaryStrategy, choose_split_boundary,
+    choose_split_boundary_with_policy,
+};
 
 fn main() {
     let samples = vec![
@@ -56,6 +59,52 @@ fn main() {
             d.left_heat,
             d.right_heat,
             d.heat_imbalance_ppm()
+        );
+    }
+
+    for (name, policy, confidence) in [
+        (
+            "storage-focused",
+            SplitBoundaryPolicy {
+                byte_weight_ppm: 900_000,
+                heat_weight_ppm: 100_000,
+                max_byte_imbalance_ppm: 600_000,
+                max_heat_imbalance_ppm: 1_000_000,
+                min_telemetry_confidence_ppm: 700_000,
+                min_score_improvement_ppm: 10_000,
+            },
+            950_000,
+        ),
+        (
+            "heat-focused",
+            SplitBoundaryPolicy {
+                byte_weight_ppm: 100_000,
+                heat_weight_ppm: 900_000,
+                max_byte_imbalance_ppm: 950_000,
+                max_heat_imbalance_ppm: 500_000,
+                min_telemetry_confidence_ppm: 700_000,
+                min_score_improvement_ppm: 10_000,
+            },
+            950_000,
+        ),
+        (
+            "low-confidence",
+            SplitBoundaryPolicy {
+                byte_weight_ppm: 500_000,
+                heat_weight_ppm: 500_000,
+                max_byte_imbalance_ppm: 1_000_000,
+                max_heat_imbalance_ppm: 1_000_000,
+                min_telemetry_confidence_ppm: 800_000,
+                min_score_improvement_ppm: 10_000,
+            },
+            500_000,
+        ),
+    ] {
+        let d = choose_split_boundary_with_policy(0, 1_u128 << 64, &samples, confidence, &policy)
+            .expect("policy decision");
+        println!(
+            "policy={name},confidence_ppm={confidence},chosen={:?},reason={:?},midpoint_score_ppm={},chosen_score_ppm={}",
+            d.chosen.strategy, d.reason, d.midpoint_score_ppm, d.chosen_score_ppm
         );
     }
 

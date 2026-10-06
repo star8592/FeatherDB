@@ -82,3 +82,91 @@ Current candidate policy:
 4. A future multi-objective/Pareto policy should be tested before any production default changes.
 
 The split boundary is therefore a policy input, not a hidden implementation detail.
+
+
+## Multi-objective policy layer
+
+A policy layer now decides whether to remain on HashMidpoint or adopt a data-aware boundary.
+
+Policy inputs:
+
+    byte_weight_ppm
+    heat_weight_ppm
+    max_byte_imbalance_ppm
+    max_heat_imbalance_ppm
+    min_telemetry_confidence_ppm
+    min_score_improvement_ppm
+
+The weighted score is computed from byte and heat imbalance.
+
+A data-aware candidate is eligible only when:
+
+1. telemetry confidence meets the minimum;
+2. byte imbalance is within the configured hard limit;
+3. heat imbalance is within the configured hard limit;
+4. weighted score improves on midpoint;
+5. improvement exceeds the minimum materiality threshold.
+
+Otherwise the decision falls back to HashMidpoint.
+
+### Storage-focused policy
+
+Configuration emphasizes bytes:
+
+    byte weight = 900,000 ppm
+    heat weight = 100,000 ppm
+    max byte imbalance = 600,000 ppm
+    telemetry confidence = 950,000 ppm
+
+Observed:
+
+    chosen = ByteMedian
+    reason = DataAwareImprovement
+    midpoint score = 812,307
+    chosen score = 544,871
+
+### Heat-focused policy
+
+Configuration emphasizes request heat:
+
+    byte weight = 100,000 ppm
+    heat weight = 900,000 ppm
+    max heat imbalance = 500,000 ppm
+    telemetry confidence = 950,000 ppm
+
+Observed:
+
+    chosen = HeatMedian
+    reason = DataAwareImprovement
+    midpoint score = 910,768
+    chosen score = 416,476
+
+### Low-confidence telemetry
+
+With telemetry confidence below the configured threshold:
+
+    chosen = HashMidpoint
+    reason = LowTelemetryConfidence
+
+No data-aware boundary is allowed to override the deterministic fallback.
+
+### Updated quality gate
+
+- cargo test: **73 passed, 0 failed**
+- cargo clippy --all-targets --all-features -- -D warnings: **pass**
+- cargo fmt --check: **pass**
+
+## Updated decision
+
+Boundary strategy must remain an explicit policy choice.
+
+HashMidpoint is the safety/default fallback.
+
+Data-aware boundaries require:
+
+    confident telemetry
+      + objective-specific weighting
+      + hard safety limits
+      + material improvement over midpoint
+
+This prevents noisy telemetry from causing unnecessary tablet-map churn.

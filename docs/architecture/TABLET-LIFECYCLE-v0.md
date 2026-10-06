@@ -363,3 +363,32 @@ Proposed control flow:
 HashMidpoint remains the fallback when data/heat telemetry is missing, stale, noisy, or not worth the added control-plane complexity.
 
 See docs/experiments/2026-10-07-split-boundary.md.
+
+
+### Multi-objective boundary selection
+
+The boundary-selection experiment now has an explicit policy layer.
+
+Inputs include:
+
+- byte-vs-heat objective weights;
+- maximum acceptable byte imbalance;
+- maximum acceptable heat imbalance;
+- telemetry confidence threshold;
+- minimum score improvement before deviating from midpoint.
+
+Selection rules:
+
+    low confidence
+      -> HashMidpoint
+
+    candidate violates a hard imbalance limit
+      -> reject candidate
+
+    candidate does not materially beat midpoint
+      -> HashMidpoint
+
+    otherwise
+      -> choose the lowest-score eligible data-aware boundary
+
+This is intentionally conservative. Split-boundary telemetry is advisory evidence, not topology authority.

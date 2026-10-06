@@ -41,6 +41,156 @@ pub enum SplitBoundaryError {
     Overflow,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct SplitBoundaryPolicy {
+    pub byte_weight_ppm: u64,
+    pub heat_weight_ppm: u64,
+    pub max_byte_imbalance_ppm: u64,
+    pub max_heat_imbalance_ppm: u64,
+    pub min_telemetry_confidence_ppm: u64,
+    pub min_score_improvement_ppm: u64,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SplitPolicyReason {
+    LowTelemetryConfidence,
+    NoEligibleImprovement,
+    DataAwareImprovement,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct SplitPolicyDecision {
+    pub chosen: SplitBoundaryDecision,
+    pub reason: SplitPolicyReason,
+    pub midpoint_score_ppm: u64,
+    pub chosen_score_ppm: u64,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SplitPolicyError {
+    InvalidWeight,
+    InvalidLimit,
+    Boundary(SplitBoundaryError),
+}
+
+impl From<SplitBoundaryError> for SplitPolicyError {
+    fn from(value: SplitBoundaryError) -> Self {
+        Self::Boundary(value)
+    }
+}
+
+impl SplitBoundaryPolicy {
+    pub fn validate(&self) -> Result<(), SplitPolicyError> {
+        if self.byte_weight_ppm == 0 && self.heat_weight_ppm == 0 {
+            return Err(SplitPolicyError::InvalidWeight);
+        }
+
+        for value in [
+            self.byte_weight_ppm,
+            self.heat_weight_ppm,
+            self.max_byte_imbalance_ppm,
+            self.max_heat_imbalance_ppm,
+            self.min_telemetry_confidence_ppm,
+            self.min_score_improvement_ppm,
+        ] {
+            if value > 1_000_000 {
+                return Err(SplitPolicyError::InvalidLimit);
+            }
+        }
+
+        Ok(())
+    }
+}
+
+pub fn choose_split_boundary_with_policy(
+    start: u128,
+    end: u128,
+    samples: &[RangeLoadSample],
+    telemetry_confidence_ppm: u64,
+    policy: &SplitBoundaryPolicy,
+) -> Result<SplitPolicyDecision, SplitPolicyError> {
+    policy.validate()?;
+    if telemetry_confidence_ppm > 1_000_000 {
+        return Err(SplitPolicyError::InvalidLimit);
+    }
+
+    let midpoint = choose_split_boundary(start, end, samples, SplitBoundaryStrategy::HashMidpoint)?;
+    let midpoint_score = weighted_score_ppm(&midpoint, policy);
+
+    if telemetry_confidence_ppm < policy.min_telemetry_confidence_ppm {
+        return Ok(SplitPolicyDecision {
+            chosen: midpoint,
+            reason: SplitPolicyReason::LowTelemetryConfidence,
+            midpoint_score_ppm: midpoint_score,
+            chosen_score_ppm: midpoint_score,
+        });
+    }
+
+    let mut best: Option<(SplitBoundaryDecision, u64)> = None;
+
+    for strategy in [
+        SplitBoundaryStrategy::ByteMedian,
+        SplitBoundaryStrategy::HeatMedian,
+    ] {
+        let candidate = match choose_split_boundary(start, end, samples, strategy) {
+            Ok(candidate) => candidate,
+            Err(SplitBoundaryError::ZeroSignal) => continue,
+            Err(error) => return Err(error.into()),
+        };
+
+        if candidate.byte_imbalance_ppm() > policy.max_byte_imbalance_ppm
+            || candidate.heat_imbalance_ppm() > policy.max_heat_imbalance_ppm
+        {
+            continue;
+        }
+
+        let score = weighted_score_ppm(&candidate, policy);
+        match best {
+            None => best = Some((candidate, score)),
+            Some((_, best_score)) if score < best_score => {
+                best = Some((candidate, score));
+            }
+            _ => {}
+        }
+    }
+
+    let Some((candidate, candidate_score)) = best else {
+        return Ok(SplitPolicyDecision {
+            chosen: midpoint,
+            reason: SplitPolicyReason::NoEligibleImprovement,
+            midpoint_score_ppm: midpoint_score,
+            chosen_score_ppm: midpoint_score,
+        });
+    };
+
+    let improvement = midpoint_score.saturating_sub(candidate_score);
+    if candidate_score >= midpoint_score || improvement < policy.min_score_improvement_ppm {
+        return Ok(SplitPolicyDecision {
+            chosen: midpoint,
+            reason: SplitPolicyReason::NoEligibleImprovement,
+            midpoint_score_ppm: midpoint_score,
+            chosen_score_ppm: midpoint_score,
+        });
+    }
+
+    Ok(SplitPolicyDecision {
+        chosen: candidate,
+        reason: SplitPolicyReason::DataAwareImprovement,
+        midpoint_score_ppm: midpoint_score,
+        chosen_score_ppm: candidate_score,
+    })
+}
+
+fn weighted_score_ppm(decision: &SplitBoundaryDecision, policy: &SplitBoundaryPolicy) -> u64 {
+    let byte = decision.byte_imbalance_ppm() as u128;
+    let heat = decision.heat_imbalance_ppm() as u128;
+    let byte_weight = policy.byte_weight_ppm as u128;
+    let heat_weight = policy.heat_weight_ppm as u128;
+    let total_weight = byte_weight + heat_weight;
+
+    (((byte * byte_weight) + (heat * heat_weight)) / total_weight) as u64
+}
+
 pub fn choose_split_boundary(
     start: u128,
     end: u128,
@@ -253,6 +403,104 @@ mod tests {
                 .unwrap();
 
         assert!(heat.heat_imbalance_ppm() < midpoint.heat_imbalance_ppm());
+    }
+
+    #[test]
+    fn low_telemetry_confidence_forces_midpoint_fallback() {
+        let samples = skewed_samples();
+        let policy = SplitBoundaryPolicy {
+            byte_weight_ppm: 500_000,
+            heat_weight_ppm: 500_000,
+            max_byte_imbalance_ppm: 1_000_000,
+            max_heat_imbalance_ppm: 1_000_000,
+            min_telemetry_confidence_ppm: 800_000,
+            min_score_improvement_ppm: 10_000,
+        };
+
+        let decision =
+            choose_split_boundary_with_policy(0, 1_u128 << 64, &samples, 799_999, &policy).unwrap();
+
+        assert_eq!(
+            decision.chosen.strategy,
+            SplitBoundaryStrategy::HashMidpoint
+        );
+        assert_eq!(decision.reason, SplitPolicyReason::LowTelemetryConfidence);
+    }
+
+    #[test]
+    fn storage_focused_policy_selects_byte_median() {
+        let samples = skewed_samples();
+        let policy = SplitBoundaryPolicy {
+            byte_weight_ppm: 900_000,
+            heat_weight_ppm: 100_000,
+            max_byte_imbalance_ppm: 600_000,
+            max_heat_imbalance_ppm: 1_000_000,
+            min_telemetry_confidence_ppm: 700_000,
+            min_score_improvement_ppm: 10_000,
+        };
+
+        let decision =
+            choose_split_boundary_with_policy(0, 1_u128 << 64, &samples, 950_000, &policy).unwrap();
+
+        assert_eq!(decision.chosen.strategy, SplitBoundaryStrategy::ByteMedian);
+        assert_eq!(decision.reason, SplitPolicyReason::DataAwareImprovement);
+        assert!(decision.chosen_score_ppm < decision.midpoint_score_ppm);
+    }
+
+    #[test]
+    fn heat_focused_policy_selects_heat_median() {
+        let samples = skewed_samples();
+        let policy = SplitBoundaryPolicy {
+            byte_weight_ppm: 100_000,
+            heat_weight_ppm: 900_000,
+            max_byte_imbalance_ppm: 950_000,
+            max_heat_imbalance_ppm: 500_000,
+            min_telemetry_confidence_ppm: 700_000,
+            min_score_improvement_ppm: 10_000,
+        };
+
+        let decision =
+            choose_split_boundary_with_policy(0, 1_u128 << 64, &samples, 950_000, &policy).unwrap();
+
+        assert_eq!(decision.chosen.strategy, SplitBoundaryStrategy::HeatMedian);
+        assert_eq!(decision.reason, SplitPolicyReason::DataAwareImprovement);
+    }
+
+    #[test]
+    fn hard_limits_can_force_midpoint_even_when_data_aware_scores_better() {
+        let samples = skewed_samples();
+        let policy = SplitBoundaryPolicy {
+            byte_weight_ppm: 500_000,
+            heat_weight_ppm: 500_000,
+            max_byte_imbalance_ppm: 700_000,
+            max_heat_imbalance_ppm: 700_000,
+            min_telemetry_confidence_ppm: 700_000,
+            min_score_improvement_ppm: 1,
+        };
+
+        let decision =
+            choose_split_boundary_with_policy(0, 1_u128 << 64, &samples, 1_000_000, &policy)
+                .unwrap();
+
+        assert_eq!(
+            decision.chosen.strategy,
+            SplitBoundaryStrategy::HashMidpoint
+        );
+        assert_eq!(decision.reason, SplitPolicyReason::NoEligibleImprovement);
+    }
+
+    #[test]
+    fn policy_rejects_all_zero_objective_weights() {
+        let policy = SplitBoundaryPolicy {
+            byte_weight_ppm: 0,
+            heat_weight_ppm: 0,
+            max_byte_imbalance_ppm: 1_000_000,
+            max_heat_imbalance_ppm: 1_000_000,
+            min_telemetry_confidence_ppm: 0,
+            min_score_improvement_ppm: 0,
+        };
+
+        assert_eq!(policy.validate(), Err(SplitPolicyError::InvalidWeight));
     }
 
     #[test]

@@ -38,6 +38,7 @@ pub use range_resize::{
 };
 
 pub use split_boundary::{
-    RangeLoadSample, SplitBoundaryDecision, SplitBoundaryError, SplitBoundaryStrategy,
-    choose_split_boundary,
+    RangeLoadSample, SplitBoundaryDecision, SplitBoundaryError, SplitBoundaryPolicy,
+    SplitBoundaryStrategy, SplitPolicyDecision, SplitPolicyError, SplitPolicyReason,
+    choose_split_boundary, choose_split_boundary_with_policy,
 };
