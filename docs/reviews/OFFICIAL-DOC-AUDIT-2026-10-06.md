@@ -185,3 +185,19 @@ The executable migration model now reflects the previously audited official-syst
 - topology-epoch changes invalidate old work.
 
 A deterministic lab demonstrated that a 16 MiB/tick target-node budget doubles convergence ticks relative to a 32 MiB/tick target-node budget for the same 32,000 MiB migration workload, confirming that node-local rate limits are behaviorally significant rather than decorative configuration.
+
+
+## Forced-loss repair audit note
+
+Current ScyllaDB documentation confirms two important distinctions now encoded in the simulator:
+
+1. replacing a dead node streams data from other live cluster nodes to the replacement;
+2. tablet-aware node removal rebuilds tablets on new replicas before removal completes.
+
+FeatherDB therefore models failed-owner identity separately from copy-source identity.
+
+Official references:
+- https://docs.scylladb.com/manual/stable/operating-scylla/procedures/cluster-management/replace-dead-node.html
+- https://docs.scylladb.com/manual/stable/operating-scylla/nodetool-commands/removenode.html
+
+The official topology-quorum prerequisite also reinforces that failure suspicion must not directly authorize permanent ownership changes.
