@@ -73,6 +73,7 @@ pub struct TickReport {
     pub completed: usize,
     pub stale: usize,
     pub source_failovers: usize,
+    pub grouped_cutovers: usize,
     pub bytes_copied: u64,
     pub active: usize,
     pub queued: usize,
@@ -453,6 +454,86 @@ impl MigrationScheduler {
                 self.total_completed += 1;
             }
         }
+
+        let tablets: BTreeSet<_> = self
+            .tasks
+            .iter()
+            .filter(|task| task.state == MigrationState::ReadyToCutover)
+            .map(|task| task.tablet_id)
+            .collect();
+
+        for tablet_id in tablets {
+            let completed = self.try_grouped_rebalance_cutover(tablet_id);
+            if completed > 0 {
+                report.completed += completed;
+                report.grouped_cutovers += 1;
+                self.total_completed += completed;
+            }
+        }
+    }
+
+    fn try_grouped_rebalance_cutover(&mut self, tablet_id: TabletId) -> usize {
+        let indices: Vec<_> = self
+            .tasks
+            .iter()
+            .enumerate()
+            .filter(|(_, task)| {
+                task.tablet_id == tablet_id
+                    && !matches!(task.state, MigrationState::Complete | MigrationState::Stale)
+            })
+            .map(|(index, _)| index)
+            .collect();
+
+        if indices.len() < 2
+            || indices.iter().any(|index| {
+                self.tasks[*index].priority != MigrationPriority::Rebalance
+                    || self.tasks[*index].state != MigrationState::ReadyToCutover
+                    || self.tasks[*index].epoch != self.cluster.epoch
+            })
+        {
+            return 0;
+        }
+
+        let Some(current) = self.actual.replicas.get(&tablet_id).cloned() else {
+            return 0;
+        };
+        let Some(desired) = self.desired.replicas.get(&tablet_id).cloned() else {
+            return 0;
+        };
+
+        let mut candidate = current;
+
+        for index in &indices {
+            let task = &self.tasks[*index];
+
+            if !desired.contains(&task.to)
+                || desired.contains(&task.owner_to_replace)
+                || candidate.contains(&task.to)
+            {
+                return 0;
+            }
+
+            let Some(slot) = candidate
+                .iter_mut()
+                .find(|node_id| **node_id == task.owner_to_replace)
+            else {
+                return 0;
+            };
+            *slot = task.to;
+        }
+
+        candidate.sort_unstable();
+
+        if candidate != desired || !replica_set_safe(&self.cluster, &candidate, self.policy) {
+            return 0;
+        }
+
+        self.actual.replicas.insert(tablet_id, candidate);
+        for index in &indices {
+            self.tasks[*index].state = MigrationState::Complete;
+        }
+
+        indices.len()
     }
 
     fn try_cutover(&mut self, index: usize) -> bool {
@@ -1288,6 +1369,61 @@ mod tests {
 
         assert_eq!(restarted.actual(), &desired);
         assert!(restarted.is_converged());
+    }
+
+    #[test]
+    fn grouped_cutover_resolves_cross_zone_swap_without_unsafe_intermediate() {
+        let cluster = Cluster {
+            epoch: 1,
+            replication_factor: 3,
+            nodes: [
+                node(1, AdminState::Active, "a"),
+                node(2, AdminState::Active, "b"),
+                node(3, AdminState::Active, "c"),
+                node(4, AdminState::Active, "b"),
+                node(5, AdminState::Active, "a"),
+            ]
+            .into_iter()
+            .map(|node| (node.id, node))
+            .collect(),
+            tablets: vec![Tablet { id: 1, bytes: 100 }],
+        };
+
+        let actual = Placement {
+            replicas: BTreeMap::from([(1, vec![1, 3, 4])]),
+        };
+        let desired = Placement {
+            replicas: BTreeMap::from([(1, vec![2, 3, 5])]),
+        };
+
+        let mut scheduler = MigrationScheduler::new(
+            cluster,
+            FailureDomainPolicy::HIERARCHICAL,
+            actual.clone(),
+            desired.clone(),
+            MigrationBudget {
+                max_active: 2,
+                max_per_node_active: 1,
+                bytes_per_tick: 200,
+                max_bytes_per_node_per_tick: 100,
+                max_bytes_per_task_per_tick: 100,
+            },
+        )
+        .unwrap();
+
+        assert_eq!(scheduler.tasks().len(), 2);
+
+        let report = scheduler.tick();
+
+        assert_eq!(report.completed, 2);
+        assert_eq!(report.grouped_cutovers, 1);
+        assert_eq!(scheduler.actual(), &desired);
+        assert!(scheduler.is_converged());
+
+        // Neither one-at-a-time replacement would have preserved three zones:
+        // A->B duplicates B, and B->A duplicates A. The whole replica-set
+        // transition is safe and is therefore committed atomically.
+        assert_ne!(scheduler.actual(), &actual);
     }
 
     #[test]

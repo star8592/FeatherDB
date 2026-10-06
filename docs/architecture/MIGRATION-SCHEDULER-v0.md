@@ -125,3 +125,37 @@ FeatherDB borrows the separation of planning from bounded execution, not the ful
 - disk-full target pauses/cancels copy;
 - 100-node churn repeatedly changes desired placement without unbounded task growth;
 - deterministic replay of every migration transition boundary.
+
+
+## Grouped tablet cutover
+
+Some safe final replica-set changes have no safe one-replica-at-a-time intermediate state.
+
+Example:
+
+    current: [A1, B1, C1]
+    desired: [A2, B2, C1]
+
+Depending on node IDs/task pairing, each individual replacement can temporarily duplicate a failure domain even though the final set remains A/B/C-valid.
+
+The scheduler now handles this case by:
+
+1. copying all non-overlapping Rebalance targets first;
+2. leaving individually unsafe tasks in ReadyToCutover;
+3. once all outstanding Rebalance tasks for that tablet are ReadyToCutover, building the complete final replica set;
+4. validating that the complete set equals desired placement and satisfies the failure-domain policy;
+5. committing the tablet replica set atomically.
+
+Repair tasks are intentionally excluded from grouped rebalance cutover for now because degraded-replica recovery has different safety semantics and should improve availability as early as possible.
+
+This avoids introducing a general dependency graph until simulation demonstrates that grouped final-set cutover is insufficient.
+
+## Relationship to mature replica-change protocols
+
+TiKV PD exposes Joint Consensus for replica scheduling, and otherwise falls back to scheduling one replica at a time.
+
+FeatherDB has a different data-plane model, so this is not Raft Joint Consensus. The shared lesson is narrower:
+
+    multi-replica membership changes need explicit intermediate-state safety.
+
+FeatherDB's current hypothesis is that tablet ownership metadata can atomically commit the final replica set after all required copies are ready.

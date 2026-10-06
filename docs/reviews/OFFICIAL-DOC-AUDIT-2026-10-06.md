@@ -201,3 +201,15 @@ Official references:
 - https://docs.scylladb.com/manual/stable/operating-scylla/nodetool-commands/removenode.html
 
 The official topology-quorum prerequisite also reinforces that failure suspicion must not directly authorize permanent ownership changes.
+
+
+## Multi-replica cutover audit note
+
+TiKV PD documents Joint Consensus as the default mechanism for replica scheduling; without it, PD schedules one replica at a time.
+
+Reference:
+- https://tikv.org/docs/7.1/deploy/configure/pd-configuration-file/
+
+FeatherDB does not infer that it needs per-tablet Raft membership. The design lesson adopted here is only that multi-replica ownership changes require explicit safe intermediate-state semantics.
+
+The current simulator uses atomic grouped tablet-map cutover after all required Rebalance copies have completed and the complete final replica set has been revalidated.

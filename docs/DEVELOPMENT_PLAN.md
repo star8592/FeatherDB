@@ -114,7 +114,7 @@ Still open:
 - persistent degraded-repair age/debt metrics;
 - checksum/version validation;
 - later anti-entropy integration;
-- dependency ordering for blocked multi-replica transitions;
+- grouped cutover now resolves the current blocked multi-replica transition case; add a dependency graph only if future scenarios still require it;
 - foreground-pressure feedback;
 - disk-full / slow-target injection.
 
@@ -212,12 +212,12 @@ Fault tests:
 - Phase 1.1: complete for hash-ring / WRH / constrained-WRH comparison.
 - Phase 1.2: partial; movement, excess-join movement, replica counts, zone/rack collisions implemented.
 - Phase 1.3: partial; strong-node join and failure-domain-pressure scenarios implemented.
-- Tests: 31 passing.
+- Tests: 32 passing.
 - First experiment: `docs/experiments/2026-10-06-placement-baseline.md`.
 - ADR-0001: still Proposed.
 - ADR-0002: still Proposed.
 
-Next priority: blocked-cutover dependency ordering, node-removal minimum-movement analysis, tablet resize state machine, deterministic fault events, then compact million-tablet simulation.
+Next priority: node-removal minimum-movement analysis, tablet resize state machine, deterministic fault events, then compact million-tablet simulation.
 
 ### Placement planner hypothesis
 
