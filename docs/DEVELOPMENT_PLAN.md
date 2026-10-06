@@ -1,6 +1,8 @@
 # FeatherDB Development Plan
 
 Status: Active
+
+Official-source audit: `docs/reviews/OFFICIAL-DOC-AUDIT-2026-10-06.md`
 Last reviewed: 2026-10-06
 
 This is the execution plan for the research/pre-prototype phase. It supersedes ad-hoc implementation order; `docs/ROADMAP.md` remains the broader research roadmap.
@@ -15,6 +17,7 @@ This is the execution plan for the research/pre-prototype phase. It supersedes a
 6. Placement policy and physical migration are separate mechanisms.
 7. Failure detection never directly authorizes destructive membership changes.
 8. A feature is not done without a machine-checkable invariant or explicit reason why one is impossible.
+9. Before any ADR becomes Accepted, complete an official-document/canonical-paper audit and record intentional divergences plus the experiment that justifies them.
 
 ## Phase 0 — repository hygiene
 
