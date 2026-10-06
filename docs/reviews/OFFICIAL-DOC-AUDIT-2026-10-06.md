@@ -172,3 +172,16 @@ Before an ADR may move from Proposed to Accepted:
 6. run the relevant simulator/test gate.
 
 "Another database does this" is never sufficient evidence by itself.
+
+
+## Migration scheduler implementation note
+
+The executable migration model now reflects the previously audited official-system lessons:
+
+- planning and physical execution are separate;
+- scheduler concurrency is bounded;
+- store/node-local transfer rate is independently bounded;
+- actual ownership changes only after data copy completes;
+- topology-epoch changes invalidate old work.
+
+A deterministic lab demonstrated that a 16 MiB/tick target-node budget doubles convergence ticks relative to a 32 MiB/tick target-node budget for the same 32,000 MiB migration workload, confirming that node-local rate limits are behaviorally significant rather than decorative configuration.

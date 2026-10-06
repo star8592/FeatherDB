@@ -78,6 +78,27 @@ Before ADR-0002 acceptance, implement split/merge hysteresis, cooldown, metadata
 
 ## Phase 2 — migration model
 
+### Phase 2 implementation status
+
+Implemented in feather-sim:
+
+- desired vs actual placement;
+- copy-before-cutover migration tasks;
+- topology-epoch cancellation/rebuild;
+- global and per-node concurrency budgets;
+- global, per-node, and per-task byte budgets;
+- canonical replica-set representation;
+- normal rebalance source/target state checks.
+
+See docs/architecture/MIGRATION-SCHEDULER-v0.md and docs/experiments/2026-10-06-migration-budget.md.
+
+Still open:
+
+- Repair priority execution after source loss;
+- dependency ordering for blocked multi-replica transitions;
+- foreground-pressure feedback;
+- disk-full / slow-target injection.
+
 Add:
 - `desired_replica_set`;
 - `actual_replica_set`;
@@ -172,12 +193,12 @@ Fault tests:
 - Phase 1.1: complete for hash-ring / WRH / constrained-WRH comparison.
 - Phase 1.2: partial; movement, excess-join movement, replica counts, zone/rack collisions implemented.
 - Phase 1.3: partial; strong-node join and failure-domain-pressure scenarios implemented.
-- Tests: 17 passing.
+- Tests: 23 passing.
 - First experiment: `docs/experiments/2026-10-06-placement-baseline.md`.
 - ADR-0001: still Proposed.
 - ADR-0002: still Proposed.
 
-Next priority: node-removal minimum-movement analysis, desired-vs-actual migration scheduler, tablet resize state machine, then compact million-tablet simulation.
+Next priority: repair/forced-loss migration path, blocked-cutover dependency ordering, node-removal minimum-movement analysis, tablet resize state machine, then compact million-tablet simulation.
 
 ### Placement planner hypothesis
 

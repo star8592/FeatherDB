@@ -36,6 +36,7 @@ pub struct MigrationBudget {
     pub max_active: usize,
     pub max_per_node_active: usize,
     pub bytes_per_tick: u64,
+    pub max_bytes_per_node_per_tick: u64,
     pub max_bytes_per_task_per_tick: u64,
 }
 
@@ -45,6 +46,7 @@ impl MigrationBudget {
             max_active: 2,
             max_per_node_active: 1,
             bytes_per_tick: 8 * 1024 * 1024,
+            max_bytes_per_node_per_tick: 4 * 1024 * 1024,
             max_bytes_per_task_per_tick: 4 * 1024 * 1024,
         }
     }
@@ -165,6 +167,7 @@ impl MigrationScheduler {
         let mut active_count = self.active_task_count();
         let mut per_node = self.active_per_node();
         let mut bytes_left = self.budget.bytes_per_tick;
+        let mut bytes_by_node = BTreeMap::<NodeId, u64>::new();
 
         for index in 0..self.tasks.len() {
             if bytes_left == 0 {
@@ -187,10 +190,8 @@ impl MigrationScheduler {
                 let to = self.tasks[index].to;
 
                 if active_count >= self.budget.max_active
-                    || per_node.get(&from).copied().unwrap_or(0)
-                        >= self.budget.max_per_node_active
-                    || per_node.get(&to).copied().unwrap_or(0)
-                        >= self.budget.max_per_node_active
+                    || per_node.get(&from).copied().unwrap_or(0) >= self.budget.max_per_node_active
+                    || per_node.get(&to).copied().unwrap_or(0) >= self.budget.max_per_node_active
                     || !source_readable(&self.cluster, from)
                     || !target_writable(&self.cluster, to)
                 {
@@ -208,13 +209,32 @@ impl MigrationScheduler {
                 continue;
             }
 
+            let from = self.tasks[index].from;
+            let to = self.tasks[index].to;
+            let from_left = self
+                .budget
+                .max_bytes_per_node_per_tick
+                .saturating_sub(bytes_by_node.get(&from).copied().unwrap_or(0));
+            let to_left = self
+                .budget
+                .max_bytes_per_node_per_tick
+                .saturating_sub(bytes_by_node.get(&to).copied().unwrap_or(0));
+
             let amount = self.tasks[index]
                 .bytes_remaining
                 .min(bytes_left)
+                .min(from_left)
+                .min(to_left)
                 .min(self.budget.max_bytes_per_task_per_tick);
+
+            if amount == 0 {
+                continue;
+            }
 
             self.tasks[index].bytes_remaining -= amount;
             bytes_left -= amount;
+            *bytes_by_node.entry(from).or_default() += amount;
+            *bytes_by_node.entry(to).or_default() += amount;
             report.bytes_copied += amount;
 
             if self.tasks[index].bytes_remaining == 0 {
@@ -314,8 +334,7 @@ impl MigrationScheduler {
 
     fn try_ready_cutovers(&mut self, report: &mut TickReport) {
         for index in 0..self.tasks.len() {
-            if self.tasks[index].state == MigrationState::ReadyToCutover
-                && self.try_cutover(index)
+            if self.tasks[index].state == MigrationState::ReadyToCutover && self.try_cutover(index)
             {
                 report.completed += 1;
                 self.total_completed += 1;
@@ -403,9 +422,10 @@ fn decrement_node(counts: &mut BTreeMap<NodeId, usize>, node_id: NodeId) {
 }
 
 fn source_readable(cluster: &Cluster, node_id: NodeId) -> bool {
-    cluster.nodes.get(&node_id).is_some_and(|node| {
-        matches!(node.state, AdminState::Active | AdminState::Draining)
-    })
+    cluster
+        .nodes
+        .get(&node_id)
+        .is_some_and(|node| matches!(node.state, AdminState::Active | AdminState::Draining))
 }
 
 fn target_writable(cluster: &Cluster, node_id: NodeId) -> bool {
@@ -415,16 +435,15 @@ fn target_writable(cluster: &Cluster, node_id: NodeId) -> bool {
         .is_some_and(|node| node.state == AdminState::Active)
 }
 
-fn replica_set_safe(
-    cluster: &Cluster,
-    replicas: &[NodeId],
-    policy: FailureDomainPolicy,
-) -> bool {
+fn replica_set_safe(cluster: &Cluster, replicas: &[NodeId], policy: FailureDomainPolicy) -> bool {
     if replicas.iter().collect::<BTreeSet<_>>().len() != replicas.len() {
         return false;
     }
 
-    if replicas.iter().any(|node_id| !target_writable(cluster, *node_id)) {
+    if replicas
+        .iter()
+        .any(|node_id| !target_writable(cluster, *node_id))
+    {
         return false;
     }
 
@@ -522,6 +541,7 @@ mod tests {
             max_active: 1,
             max_per_node_active: 1,
             bytes_per_tick: 40,
+            max_bytes_per_node_per_tick: 40,
             max_bytes_per_task_per_tick: 40,
         };
         let mut scheduler = MigrationScheduler::new(
@@ -556,10 +576,7 @@ mod tests {
             .into_iter()
             .map(|node| (node.id, node))
             .collect(),
-            tablets: vec![
-                Tablet { id: 1, bytes: 100 },
-                Tablet { id: 2, bytes: 100 },
-            ],
+            tablets: vec![Tablet { id: 1, bytes: 100 }, Tablet { id: 2, bytes: 100 }],
         };
         let actual = Placement {
             replicas: BTreeMap::from([(1, vec![1, 2]), (2, vec![1, 2])]),
@@ -571,6 +588,7 @@ mod tests {
             max_active: 2,
             max_per_node_active: 1,
             bytes_per_tick: 100,
+            max_bytes_per_node_per_tick: 100,
             max_bytes_per_task_per_tick: 50,
         };
         let mut scheduler = MigrationScheduler::new(
@@ -588,6 +606,38 @@ mod tests {
     }
 
     #[test]
+    fn removed_source_cannot_start_normal_rebalance() {
+        let mut cluster = one_tablet_cluster(100);
+        cluster.nodes.get_mut(&1).unwrap().state = AdminState::Removed;
+        let actual = Placement {
+            replicas: BTreeMap::from([(1, vec![1, 2])]),
+        };
+        let desired = Placement {
+            replicas: BTreeMap::from([(1, vec![2, 3])]),
+        };
+        let budget = MigrationBudget {
+            max_active: 1,
+            max_per_node_active: 1,
+            bytes_per_tick: 100,
+            max_bytes_per_node_per_tick: 100,
+            max_bytes_per_task_per_tick: 100,
+        };
+        let mut scheduler = MigrationScheduler::new(
+            cluster,
+            FailureDomainPolicy::HIERARCHICAL,
+            actual.clone(),
+            desired,
+            budget,
+        )
+        .unwrap();
+
+        let report = scheduler.tick();
+        assert_eq!(report.started, 0);
+        assert_eq!(scheduler.actual(), &actual);
+        assert!(!scheduler.is_converged());
+    }
+
+    #[test]
     fn desired_epoch_change_cancels_old_work() {
         let cluster = one_tablet_cluster(100);
         let actual = Placement {
@@ -600,6 +650,7 @@ mod tests {
             max_active: 1,
             max_per_node_active: 1,
             bytes_per_tick: 40,
+            max_bytes_per_node_per_tick: 40,
             max_bytes_per_task_per_tick: 40,
         };
         let mut scheduler = MigrationScheduler::new(
@@ -638,29 +689,22 @@ mod tests {
             .into_iter()
             .map(|node| (node.id, node))
             .collect::<BTreeMap<_, _>>(),
-            tablets: (0..100)
-                .map(|id| Tablet { id, bytes: 10 })
-                .collect(),
+            tablets: (0..100).map(|id| Tablet { id, bytes: 10 }).collect(),
         };
-        let actual = PlacementStrategy::WeightedRendezvous
-            .place(&before, FailureDomainPolicy::HIERARCHICAL);
+        let actual =
+            PlacementStrategy::WeightedRendezvous.place(&before, FailureDomainPolicy::HIERARCHICAL);
 
         let mut after = before.clone();
         after.epoch = 2;
-        after
-            .nodes
-            .insert(4, node(4, AdminState::Active, "d"));
-        let planned = plan_rebalance(
-            &after,
-            &actual,
-            FailureDomainPolicy::HIERARCHICAL,
-        );
+        after.nodes.insert(4, node(4, AdminState::Active, "d"));
+        let planned = plan_rebalance(&after, &actual, FailureDomainPolicy::HIERARCHICAL);
         assert!(planned.converged);
 
         let budget = MigrationBudget {
             max_active: 4,
             max_per_node_active: 2,
             bytes_per_tick: 80,
+            max_bytes_per_node_per_tick: 40,
             max_bytes_per_task_per_tick: 20,
         };
         let mut scheduler = MigrationScheduler::new(

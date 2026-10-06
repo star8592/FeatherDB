@@ -100,6 +100,7 @@ fn select_replicas(
         }
     }
 
+    selected.sort_unstable();
     selected
 }
 
@@ -207,6 +208,25 @@ mod tests {
             .map(|node| (node.id, node))
             .collect::<BTreeMap<_, _>>(),
             tablets: (0..tablets).map(|id| Tablet { id, bytes: 1024 }).collect(),
+        }
+    }
+
+    #[test]
+    fn replica_order_is_canonical() {
+        let cluster = cluster(256);
+        for strategy in [
+            PlacementStrategy::HashRing {
+                virtual_nodes_per_weight: 64,
+            },
+            PlacementStrategy::WeightedRendezvous,
+        ] {
+            let placement = strategy.place(&cluster, FailureDomainPolicy::HIERARCHICAL);
+            assert!(
+                placement
+                    .replicas
+                    .values()
+                    .all(|replicas| { replicas.windows(2).all(|pair| pair[0] < pair[1]) })
+            );
         }
     }
 
