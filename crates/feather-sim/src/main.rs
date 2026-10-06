@@ -2,7 +2,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use feather_sim::{
     AdminState, Cluster, FailureDomainPolicy, Node, PlacementMetrics, PlacementStrategy, Tablet,
-    join_movement_breakdown, movement_ratio,
+    movement_ratio, transition_movement_breakdown,
 };
 
 fn node(id: u64, weight: u32, zone: &str, rack: &str) -> Node {
@@ -24,58 +24,73 @@ fn tablets(count: u64) -> Vec<Tablet> {
         .collect()
 }
 
-fn strong_join_scenario(tablet_count: u64) -> (Cluster, Cluster, BTreeSet<u64>) {
-    let before_nodes = [
-        node(1, 1, "a", "r1"),
-        node(2, 2, "b", "r1"),
-        node(3, 4, "c", "r1"),
-    ]
-    .into_iter()
-    .map(|node| (node.id, node))
-    .collect::<BTreeMap<_, _>>();
-
-    let before = Cluster {
+fn base_heterogeneous(tablet_count: u64) -> Cluster {
+    Cluster {
         epoch: 1,
         replication_factor: 2,
-        nodes: before_nodes,
+        nodes: [
+            node(1, 1, "a", "r1"),
+            node(2, 2, "b", "r1"),
+            node(3, 4, "c", "r1"),
+            node(4, 8, "d", "r1"),
+        ]
+        .into_iter()
+        .map(|node| (node.id, node))
+        .collect::<BTreeMap<_, _>>(),
         tablets: tablets(tablet_count),
-    };
+    }
+}
 
+fn strong_join_scenario(tablet_count: u64) -> (Cluster, Cluster, BTreeSet<u64>) {
+    let mut before = base_heterogeneous(tablet_count);
+    before.nodes.remove(&4);
     let mut after = before.clone();
     after.epoch = 2;
     after.nodes.insert(4, node(4, 8, "d", "r1"));
-
     (before, after, BTreeSet::from([4]))
 }
 
-fn domain_pressure_scenario(tablet_count: u64) -> (Cluster, Cluster, BTreeSet<u64>) {
-    let before_nodes = [
-        node(1, 1, "a", "r1"),
-        node(2, 1, "a", "r2"),
-        node(3, 1, "b", "r1"),
-        node(4, 1, "b", "r2"),
-        node(5, 1, "c", "r1"),
-        node(6, 1, "c", "r2"),
-    ]
-    .into_iter()
-    .map(|node| (node.id, node))
-    .collect::<BTreeMap<_, _>>();
+fn leave_scenario(tablet_count: u64) -> (Cluster, Cluster, BTreeSet<u64>) {
+    let before = base_heterogeneous(tablet_count);
+    let mut after = before.clone();
+    after.epoch = 2;
+    after.nodes.get_mut(&2).unwrap().state = AdminState::Removed;
+    (before, after, BTreeSet::from([2]))
+}
 
+fn weight_change_scenario(tablet_count: u64) -> (Cluster, Cluster, BTreeSet<u64>) {
+    let before = base_heterogeneous(tablet_count);
+    let mut after = before.clone();
+    after.epoch = 2;
+    after.nodes.get_mut(&2).unwrap().weight = 6;
+    (before, after, BTreeSet::from([2]))
+}
+
+fn domain_pressure_scenario(tablet_count: u64) -> (Cluster, Cluster, BTreeSet<u64>) {
     let before = Cluster {
         epoch: 1,
         replication_factor: 3,
-        nodes: before_nodes,
+        nodes: [
+            node(1, 1, "a", "r1"),
+            node(2, 1, "a", "r2"),
+            node(3, 1, "b", "r1"),
+            node(4, 1, "b", "r2"),
+            node(5, 1, "c", "r1"),
+            node(6, 1, "c", "r2"),
+        ]
+        .into_iter()
+        .map(|node| (node.id, node))
+        .collect::<BTreeMap<_, _>>(),
         tablets: tablets(tablet_count),
     };
 
     let mut after = before.clone();
     after.epoch = 2;
     after.nodes.insert(7, node(7, 1, "d", "r1"));
-
     (before, after, BTreeSet::from([7]))
 }
 
-fn run_scenario(name: &str, before: &Cluster, after: &Cluster, joining_nodes: &BTreeSet<u64>) {
+fn run_scenario(name: &str, before: &Cluster, after: &Cluster, affected_nodes: &BTreeSet<u64>) {
     let experiments = [
         (
             PlacementStrategy::HashRing {
@@ -102,7 +117,7 @@ fn run_scenario(name: &str, before: &Cluster, after: &Cluster, joining_nodes: &B
         before.replication_factor
     );
     println!(
-        "strategy,movement_ratio,excess_join_bytes,zone_collisions,rack_collisions,max_capacity_error,replica_counts"
+        "strategy,movement_ratio,excess_changed_tablets,zone_collisions,rack_collisions,max_capacity_error,max_zone_aware_error,replica_counts"
     );
 
     for (strategy, policy, label) in experiments {
@@ -110,11 +125,15 @@ fn run_scenario(name: &str, before: &Cluster, after: &Cluster, joining_nodes: &B
         let new = strategy.place(after, policy);
         let metrics = PlacementMetrics::calculate(after, &new);
         let movement = movement_ratio(&old, &new, &after.tablets, before.replication_factor);
-        let breakdown = join_movement_breakdown(&old, &new, &after.tablets, joining_nodes);
+        let transition = transition_movement_breakdown(&old, &new, &after.tablets, affected_nodes);
+        let zone_error = metrics
+            .max_zone_aware_capacity_inclusion_error
+            .map(|value| format!("{value:.6}"))
+            .unwrap_or_else(|| "n/a".into());
 
         println!(
-            "{label},{movement:.6},{},{},{},{:.6},{:?}",
-            breakdown.excess_bytes_to_existing_nodes,
+            "{label},{movement:.6},{},{},{},{:.6},{zone_error},{:?}",
+            transition.excess_changed_tablets,
             metrics.zone_collisions,
             metrics.rack_collisions,
             metrics.max_capacity_inclusion_error,
@@ -131,9 +150,21 @@ fn main() {
 
     println!("feather-sim placement comparison");
 
-    let (before, after, joining) = strong_join_scenario(tablet_count);
-    run_scenario("heterogeneous-strong-join", &before, &after, &joining);
-
-    let (before, after, joining) = domain_pressure_scenario(tablet_count);
-    run_scenario("failure-domain-pressure", &before, &after, &joining);
+    for (name, scenario) in [
+        (
+            "heterogeneous-strong-join",
+            strong_join_scenario(tablet_count),
+        ),
+        ("heterogeneous-leave", leave_scenario(tablet_count)),
+        (
+            "heterogeneous-weight-change",
+            weight_change_scenario(tablet_count),
+        ),
+        (
+            "failure-domain-pressure",
+            domain_pressure_scenario(tablet_count),
+        ),
+    ] {
+        run_scenario(name, &scenario.0, &scenario.1, &scenario.2);
+    }
 }

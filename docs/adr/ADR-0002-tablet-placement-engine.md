@@ -118,6 +118,12 @@ Capacity fairness must be measured against a feasible target that accounts for:
 
 See `docs/experiments/2026-10-06-placement-baseline.md`.
 
+## Tablet lifecycle evidence
+
+Official ScyllaDB and TiKV documentation confirms that production partition units need dynamic split/merge control and anti-oscillation/resource limits. ADR-0002 therefore also requires a tablet lifecycle policy with hysteresis, cooldown, and metadata-budget validation.
+
+See docs/architecture/TABLET-LIFECYCLE-v0.md.
+
 ## Acceptance gate
 
 This ADR must not become Accepted until deterministic simulation demonstrates:

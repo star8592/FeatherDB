@@ -175,3 +175,62 @@ This three-layer split is now the leading architecture hypothesis.
 
 ScyllaDB independently provides useful engineering evidence for this direction: its tablet load balancer uses actual tablet/disk utilization to decide migrations rather than relying only on stateless hashing:
 https://docs.scylladb.com/manual/stable/architecture/tablets.html
+
+
+## Iteration 3 — leave, weight change, and zone-aware target
+
+The simulator now measures:
+- topology-transition changes unrelated to the explicitly affected node set;
+- a first zone-aware feasible capacity target;
+- leave and weight-change scenarios.
+
+Quality gate:
+- cargo test: 13 passed, 0 failed
+- clippy with -D warnings: pass
+
+At 100,000 tablets:
+
+### Heterogeneous leave
+
+Weights before: 1:2:4:8, RF=2. Node weight=2 leaves.
+
+| Strategy | Movement ratio | Unrelated changed tablets | Capacity error |
+|---|---:|---:|---:|
+| Hash ring | 0.162740 | 0 | 0.053420 |
+| WRH | 0.172175 | 0 | 0.060540 |
+| Constrained WRH | 0.172175 | 0 | 0.060540 |
+
+### Heterogeneous weight change
+
+Weights change from 1:2:4:8 to 1:6:4:8, RF=2.
+
+| Strategy | Movement ratio | Unrelated changed tablets | Capacity error |
+|---|---:|---:|---:|
+| Hash ring | 0.167010 | 0 | 0.097025 |
+| WRH | 0.151770 | 0 | 0.092915 |
+| Constrained WRH | 0.151770 | 0 | 0.092915 |
+
+### Failure-domain pressure
+
+Equal-weight nodes, RF=3, three zones with two nodes each; a seventh equal-weight node joins as a fourth zone.
+
+| Strategy | Movement ratio | Unrelated changed tablets | Zone collisions | Zone-aware capacity error |
+|---|---:|---:|---:|---:|
+| Hash ring | 0.128477 | 0 | 49,242 | 0.043141 |
+| WRH | 0.143547 | 0 | 42,810 | 0.003831 |
+| Constrained WRH | 0.181827 | 0 | 0 | 0.116909 |
+
+### Interpretation
+
+1. The ranking algorithms preserve strong minimal-disruption behavior for these isolated topology changes: unrelated remapping is zero.
+2. Plain WRH balances equal-weight nodes very closely, but does not enforce failure-domain diversity.
+3. Constrained WRH removes all avoidable zone collisions, but overuses the single-node new zone relative to the capacity-balanced domain-aware target.
+4. Therefore a stateful planner has a concrete optimization opportunity: keep the zero-collision property while moving the single-node zone toward its feasible target share.
+5. The current zone-aware target is only a first-level zone model. Rack hierarchy, unequal tablet bytes, hotness, and hard disk-pressure admission remain unmodeled.
+
+This strengthens the current architecture split:
+
+    deterministic ranking
+        -> stateful constraint/capacity planner
+        -> desired placement
+        -> bounded migration

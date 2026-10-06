@@ -72,6 +72,10 @@ Exit gate for ADR-0002 candidate:
 - weight-proportional responsibility within documented tolerance;
 - no algorithm selected solely from one happy-path benchmark.
 
+### Tablet lifecycle track
+
+Before ADR-0002 acceptance, implement split/merge hysteresis, cooldown, metadata-budget limits, and crash-replay tests. See docs/architecture/TABLET-LIFECYCLE-v0.md.
+
 ## Phase 2 — migration model
 
 Add:
@@ -168,12 +172,12 @@ Fault tests:
 - Phase 1.1: complete for hash-ring / WRH / constrained-WRH comparison.
 - Phase 1.2: partial; movement, excess-join movement, replica counts, zone/rack collisions implemented.
 - Phase 1.3: partial; strong-node join and failure-domain-pressure scenarios implemented.
-- Tests: 11 passing.
+- Tests: 13 passing.
 - First experiment: `docs/experiments/2026-10-06-placement-baseline.md`.
 - ADR-0001: still Proposed.
 - ADR-0002: still Proposed.
 
-Next priority: domain-aware feasible-capacity planning, leave/weight-change scenarios, compact simulator representation, then desired-vs-actual migration.
+Next priority: stateful domain-aware placement planner, tablet resize state machine, compact simulator representation, then desired-vs-actual migration.
 
 ### Placement planner hypothesis
 

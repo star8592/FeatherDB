@@ -6,8 +6,9 @@ pub mod model;
 pub mod placement;
 
 pub use metrics::{
-    JoinMovementBreakdown, PlacementMetrics, feasible_capacity_inclusion_targets,
-    join_movement_breakdown, moved_bytes, movement_ratio,
+    JoinMovementBreakdown, PlacementMetrics, TransitionMovementBreakdown,
+    feasible_capacity_inclusion_targets, join_movement_breakdown, moved_bytes, movement_ratio,
+    transition_movement_breakdown, zone_aware_capacity_inclusion_targets,
 };
 pub use model::{AdminState, Cluster, Node, NodeId, Placement, Tablet, TabletId};
 pub use placement::{FailureDomainPolicy, PlacementStrategy};

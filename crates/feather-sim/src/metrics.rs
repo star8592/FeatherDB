@@ -8,6 +8,7 @@ pub struct PlacementMetrics {
     pub zone_collisions: usize,
     pub rack_collisions: usize,
     pub max_capacity_inclusion_error: f64,
+    pub max_zone_aware_capacity_inclusion_error: Option<f64>,
 }
 
 impl PlacementMetrics {
@@ -50,11 +51,28 @@ impl PlacementMetrics {
                 .fold(0.0, f64::max)
         };
 
+        let max_zone_aware_capacity_inclusion_error =
+            zone_aware_capacity_inclusion_targets(cluster).map(|targets| {
+                if tablet_count == 0.0 {
+                    0.0
+                } else {
+                    targets
+                        .iter()
+                        .map(|(node_id, target)| {
+                            let actual = replica_counts.get(node_id).copied().unwrap_or(0) as f64
+                                / tablet_count;
+                            (actual - target).abs()
+                        })
+                        .fold(0.0, f64::max)
+                }
+            });
+
         Self {
             replica_counts,
             zone_collisions,
             rack_collisions,
             max_capacity_inclusion_error,
+            max_zone_aware_capacity_inclusion_error,
         }
     }
 }
@@ -113,6 +131,147 @@ pub fn feasible_capacity_inclusion_targets(cluster: &Cluster) -> BTreeMap<NodeId
                 result.insert(node.id, 0.0);
             }
             break;
+        }
+    }
+
+    result
+}
+
+fn capped_proportional_targets(
+    weighted_items: &[(u64, f64)],
+    total_mass: f64,
+    cap: f64,
+) -> BTreeMap<u64, f64> {
+    let mut result = BTreeMap::new();
+    let mut remaining = weighted_items.to_vec();
+    let mut mass_left = total_mass;
+
+    while !remaining.is_empty() && mass_left > 0.0 {
+        let weight_sum: f64 = remaining.iter().map(|(_, weight)| *weight).sum();
+        if weight_sum <= 0.0 {
+            break;
+        }
+
+        let lambda = mass_left / weight_sum;
+        let saturated: Vec<_> = remaining
+            .iter()
+            .filter(|(_, weight)| lambda * *weight >= cap)
+            .map(|(id, _)| *id)
+            .collect();
+
+        if saturated.is_empty() {
+            for (id, weight) in remaining {
+                result.insert(id, lambda * weight);
+            }
+            return result;
+        }
+
+        for id in &saturated {
+            result.insert(*id, cap);
+        }
+        mass_left -= cap * saturated.len() as f64;
+        remaining.retain(|(id, _)| !saturated.contains(id));
+    }
+
+    for (id, _) in remaining {
+        result.entry(id).or_insert(0.0);
+    }
+
+    result
+}
+
+/// Zone-aware feasible inclusion targets for a strict distinct-zone policy.
+///
+/// Each zone can contribute at most one replica of a tablet. Zone mass is first
+/// allocated proportional to total eligible node weight, capped at one replica
+/// per zone, then divided among nodes in that zone by node weight.
+///
+/// Returns None when the cluster has fewer eligible zones than RF.
+pub fn zone_aware_capacity_inclusion_targets(cluster: &Cluster) -> Option<BTreeMap<NodeId, f64>> {
+    let mut zones: BTreeMap<String, Vec<_>> = BTreeMap::new();
+    for node in cluster.nodes.values().filter(|node| node.eligible()) {
+        zones.entry(node.zone.clone()).or_default().push(node);
+    }
+
+    let rf = cluster
+        .replication_factor
+        .min(cluster.eligible_node_count());
+
+    if rf == 0 {
+        return Some(BTreeMap::new());
+    }
+    if zones.len() < rf {
+        return None;
+    }
+
+    let zone_items: Vec<_> = zones
+        .iter()
+        .enumerate()
+        .map(|(index, (_, nodes))| {
+            let weight = nodes.iter().map(|node| node.weight as f64).sum::<f64>();
+            (index as u64, weight)
+        })
+        .collect();
+
+    let zone_targets = capped_proportional_targets(&zone_items, rf as f64, 1.0);
+    let mut result = BTreeMap::new();
+
+    for (index, (_, nodes)) in zones.iter().enumerate() {
+        let zone_mass = zone_targets.get(&(index as u64)).copied().unwrap_or(0.0);
+        let total_weight = nodes.iter().map(|node| node.weight as f64).sum::<f64>();
+
+        for node in nodes {
+            let target = if total_weight > 0.0 {
+                zone_mass * node.weight as f64 / total_weight
+            } else {
+                0.0
+            };
+            result.insert(node.id, target);
+        }
+    }
+
+    Some(result)
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct TransitionMovementBreakdown {
+    pub total_changed_tablets: usize,
+    pub affected_changed_tablets: usize,
+    pub excess_changed_tablets: usize,
+}
+
+pub fn transition_movement_breakdown(
+    before: &Placement,
+    after: &Placement,
+    tablets: &[Tablet],
+    affected_nodes: &std::collections::BTreeSet<NodeId>,
+) -> TransitionMovementBreakdown {
+    let mut result = TransitionMovementBreakdown::default();
+
+    for tablet in tablets {
+        let old = before
+            .replicas
+            .get(&tablet.id)
+            .map(Vec::as_slice)
+            .unwrap_or(&[]);
+        let new = after
+            .replicas
+            .get(&tablet.id)
+            .map(Vec::as_slice)
+            .unwrap_or(&[]);
+
+        if old == new {
+            continue;
+        }
+
+        result.total_changed_tablets += 1;
+        let involved = old.iter().any(|id| affected_nodes.contains(id))
+            || new.iter().any(|id| affected_nodes.contains(id));
+
+        if involved {
+            result.affected_changed_tablets += 1;
+        } else {
+            result.excess_changed_tablets += 1;
         }
     }
 
@@ -246,6 +405,94 @@ mod tests {
         assert!((targets[&3] - 4.0 / 7.0).abs() < 1e-12);
         assert!((targets[&4] - 1.0).abs() < 1e-12);
         assert!((targets.values().sum::<f64>() - 2.0).abs() < 1e-12);
+    }
+
+    #[test]
+    fn zone_aware_target_accounts_for_zone_capacity() {
+        let cluster = Cluster {
+            epoch: 1,
+            replication_factor: 3,
+            nodes: [
+                Node {
+                    id: 1,
+                    weight: 1,
+                    zone: "a".into(),
+                    rack: "r1".into(),
+                    state: AdminState::Active,
+                },
+                Node {
+                    id: 2,
+                    weight: 1,
+                    zone: "a".into(),
+                    rack: "r2".into(),
+                    state: AdminState::Active,
+                },
+                Node {
+                    id: 3,
+                    weight: 1,
+                    zone: "b".into(),
+                    rack: "r1".into(),
+                    state: AdminState::Active,
+                },
+                Node {
+                    id: 4,
+                    weight: 1,
+                    zone: "b".into(),
+                    rack: "r2".into(),
+                    state: AdminState::Active,
+                },
+                Node {
+                    id: 5,
+                    weight: 1,
+                    zone: "c".into(),
+                    rack: "r1".into(),
+                    state: AdminState::Active,
+                },
+                Node {
+                    id: 6,
+                    weight: 1,
+                    zone: "c".into(),
+                    rack: "r2".into(),
+                    state: AdminState::Active,
+                },
+                Node {
+                    id: 7,
+                    weight: 1,
+                    zone: "d".into(),
+                    rack: "r1".into(),
+                    state: AdminState::Active,
+                },
+            ]
+            .into_iter()
+            .map(|node| (node.id, node))
+            .collect(),
+            tablets: vec![],
+        };
+
+        let targets = zone_aware_capacity_inclusion_targets(&cluster).unwrap();
+        for target in targets.values() {
+            assert!((*target - 3.0 / 7.0).abs() < 1e-12);
+        }
+        assert!((targets.values().sum::<f64>() - 3.0).abs() < 1e-12);
+    }
+
+    #[test]
+    fn transition_breakdown_flags_unrelated_remapping() {
+        use std::collections::BTreeSet;
+
+        let tablets = vec![Tablet { id: 1, bytes: 1 }, Tablet { id: 2, bytes: 1 }];
+        let before = Placement {
+            replicas: BTreeMap::from([(1, vec![1]), (2, vec![2])]),
+        };
+        let after = Placement {
+            replicas: BTreeMap::from([(1, vec![3]), (2, vec![4])]),
+        };
+        let affected = BTreeSet::from([3]);
+        let breakdown = transition_movement_breakdown(&before, &after, &tablets, &affected);
+
+        assert_eq!(breakdown.total_changed_tablets, 2);
+        assert_eq!(breakdown.affected_changed_tablets, 1);
+        assert_eq!(breakdown.excess_changed_tablets, 1);
     }
 
     #[test]
