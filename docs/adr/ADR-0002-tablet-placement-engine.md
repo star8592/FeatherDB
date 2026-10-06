@@ -92,6 +92,32 @@ Rejected for V0 because it introduces substantial per-tablet runtime and protoco
 7. How should a weak node advertise a trustworthy capacity weight?
 8. Do we need separate storage-capacity and request-throughput weights?
 
+
+## Evidence update — 2026-10-06
+
+The first executable comparison changed the interpretation of this ADR.
+
+Stateless weighted rendezvous has excellent minimal-disruption properties and is a useful deterministic ranking primitive, but with highly skewed node capacities and RF>1 it does not automatically produce the desired capped capacity allocation.
+
+The working model is therefore now:
+
+    candidate ranking
+        -> constraint-aware placement planner
+        -> desired tablet map
+        -> bounded migration scheduler
+        -> actual tablet map
+
+WRH remains a leading candidate for deterministic ranking/tie-breaking. It is no longer assumed to be the complete placement allocator.
+
+Capacity fairness must be measured against a feasible target that accounts for:
+- one replica per node per tablet;
+- RF;
+- node capacity;
+- rack/zone constraints;
+- eventually tablet byte size and heat.
+
+See `docs/experiments/2026-10-06-placement-baseline.md`.
+
 ## Acceptance gate
 
 This ADR must not become Accepted until deterministic simulation demonstrates:

@@ -126,3 +126,52 @@ Evidence is not yet sufficient to freeze:
 - domain hierarchy semantics;
 - tablet count;
 - production numeric representation.
+
+
+## Iteration 2 — feasible capacity target
+
+A capacity-only feasible inclusion target was added:
+
+    p_i = min(1, lambda * weight_i)
+    sum(p_i) = RF
+
+This captures a fundamental replication constraint: a node cannot hold two replicas of the same tablet.
+
+At 100,000 tablets:
+
+### Heterogeneous strong-node join
+
+| Strategy | Max feasible-capacity inclusion error |
+|---|---:|
+| Hash ring | 0.163960 |
+| WRH | 0.153800 |
+| Constrained WRH | 0.153800 |
+
+WRH improves on the ring but still misses the capacity-only optimum materially. With weights 1:2:4:8 and RF=2, the capped proportional target makes the weight-8 node eligible for essentially one replica of every tablet; stateless top-k WRH only places it on about 84.6% of tablets.
+
+This is evidence that **weighted rendezvous should remain a candidate-ranking primitive, not be assumed to be the final tablet allocator**.
+
+### Failure-domain pressure
+
+| Strategy | Capacity-only error | Zone collisions |
+|---|---:|---:|
+| Hash ring | 0.043141 | 49,242 |
+| WRH | 0.003831 | 42,810 |
+| Constrained WRH | 0.116909 | 0 |
+
+The constrained result is not a failure of the constraint policy. The capacity-only target does not model zone diversity, so once domain constraints bind, it is the wrong objective.
+
+The next metric must therefore be **domain-aware feasible capacity**, not raw node capacity.
+
+## Architecture consequence
+
+FeatherDB should distinguish:
+
+1. **Candidate ranking** — deterministic, low-churn ordering such as WRH.
+2. **Placement planner** — stateful optimizer over current assignments, node/domain capacities, tablet sizes/hotness, and safety constraints.
+3. **Migration scheduler** — bounded execution from actual placement toward desired placement.
+
+This three-layer split is now the leading architecture hypothesis.
+
+ScyllaDB independently provides useful engineering evidence for this direction: its tablet load balancer uses actual tablet/disk utilization to decide migrations rather than relying only on stateless hashing:
+https://docs.scylladb.com/manual/stable/architecture/tablets.html

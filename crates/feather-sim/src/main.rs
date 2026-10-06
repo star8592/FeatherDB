@@ -102,7 +102,7 @@ fn run_scenario(name: &str, before: &Cluster, after: &Cluster, joining_nodes: &B
         before.replication_factor
     );
     println!(
-        "strategy,movement_ratio,excess_join_bytes,zone_collisions,rack_collisions,replica_counts"
+        "strategy,movement_ratio,excess_join_bytes,zone_collisions,rack_collisions,max_capacity_error,replica_counts"
     );
 
     for (strategy, policy, label) in experiments {
@@ -113,10 +113,11 @@ fn run_scenario(name: &str, before: &Cluster, after: &Cluster, joining_nodes: &B
         let breakdown = join_movement_breakdown(&old, &new, &after.tablets, joining_nodes);
 
         println!(
-            "{label},{movement:.6},{},{},{},{:?}",
+            "{label},{movement:.6},{},{},{},{:.6},{:?}",
             breakdown.excess_bytes_to_existing_nodes,
             metrics.zone_collisions,
             metrics.rack_collisions,
+            metrics.max_capacity_inclusion_error,
             metrics.replica_counts
         );
     }

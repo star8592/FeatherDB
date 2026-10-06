@@ -7,6 +7,7 @@ pub struct PlacementMetrics {
     pub replica_counts: BTreeMap<NodeId, usize>,
     pub zone_collisions: usize,
     pub rack_collisions: usize,
+    pub max_capacity_inclusion_error: f64,
 }
 
 impl PlacementMetrics {
@@ -34,12 +35,88 @@ impl PlacementMetrics {
             }
         }
 
+        let targets = feasible_capacity_inclusion_targets(cluster);
+        let tablet_count = cluster.tablets.len() as f64;
+        let max_capacity_inclusion_error = if tablet_count == 0.0 {
+            0.0
+        } else {
+            targets
+                .iter()
+                .map(|(node_id, target)| {
+                    let actual =
+                        replica_counts.get(node_id).copied().unwrap_or(0) as f64 / tablet_count;
+                    (actual - target).abs()
+                })
+                .fold(0.0, f64::max)
+        };
+
         Self {
             replica_counts,
             zone_collisions,
             rack_collisions,
+            max_capacity_inclusion_error,
         }
     }
+}
+
+/// Capacity-only feasible average inclusion target.
+///
+/// For equal-sized tablets, each node can hold at most one replica of a tablet.
+/// We therefore solve for targets p_i = min(1, lambda * weight_i) such that
+/// sum(p_i) = RF. This is a node-capacity target only; rack/zone constraints
+/// can further reduce the feasible set.
+pub fn feasible_capacity_inclusion_targets(cluster: &Cluster) -> BTreeMap<NodeId, f64> {
+    let eligible: Vec<_> = cluster
+        .nodes
+        .values()
+        .filter(|node| node.eligible())
+        .collect();
+    let target_replica_count = cluster.replication_factor.min(eligible.len());
+
+    if target_replica_count == 0 {
+        return BTreeMap::new();
+    }
+
+    let mut result = BTreeMap::new();
+    let mut remaining: Vec<_> = eligible;
+    let mut replicas_left = target_replica_count as f64;
+
+    loop {
+        if remaining.is_empty() {
+            break;
+        }
+
+        let weight_sum: f64 = remaining.iter().map(|node| node.weight as f64).sum();
+        let lambda = replicas_left / weight_sum;
+
+        let saturated: Vec<_> = remaining
+            .iter()
+            .filter(|node| lambda * node.weight as f64 >= 1.0)
+            .map(|node| node.id)
+            .collect();
+
+        if saturated.is_empty() {
+            for node in remaining {
+                result.insert(node.id, lambda * node.weight as f64);
+            }
+            break;
+        }
+
+        for node_id in &saturated {
+            result.insert(*node_id, 1.0);
+        }
+        replicas_left -= saturated.len() as f64;
+        remaining.retain(|node| !saturated.contains(&node.id));
+
+        if replicas_left <= 0.0 {
+            for node in remaining {
+                result.insert(node.id, 0.0);
+            }
+            break;
+        }
+    }
+
+    result
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -121,6 +198,55 @@ mod tests {
 
     use super::*;
     use crate::model::{AdminState, Node, Tablet};
+
+    #[test]
+    fn feasible_capacity_target_caps_large_nodes() {
+        let cluster = Cluster {
+            epoch: 1,
+            replication_factor: 2,
+            nodes: [
+                Node {
+                    id: 1,
+                    weight: 1,
+                    zone: "a".into(),
+                    rack: "r1".into(),
+                    state: AdminState::Active,
+                },
+                Node {
+                    id: 2,
+                    weight: 2,
+                    zone: "b".into(),
+                    rack: "r1".into(),
+                    state: AdminState::Active,
+                },
+                Node {
+                    id: 3,
+                    weight: 4,
+                    zone: "c".into(),
+                    rack: "r1".into(),
+                    state: AdminState::Active,
+                },
+                Node {
+                    id: 4,
+                    weight: 8,
+                    zone: "d".into(),
+                    rack: "r1".into(),
+                    state: AdminState::Active,
+                },
+            ]
+            .into_iter()
+            .map(|node| (node.id, node))
+            .collect(),
+            tablets: vec![],
+        };
+
+        let targets = feasible_capacity_inclusion_targets(&cluster);
+        assert!((targets[&1] - 1.0 / 7.0).abs() < 1e-12);
+        assert!((targets[&2] - 2.0 / 7.0).abs() < 1e-12);
+        assert!((targets[&3] - 4.0 / 7.0).abs() < 1e-12);
+        assert!((targets[&4] - 1.0).abs() < 1e-12);
+        assert!((targets.values().sum::<f64>() - 2.0).abs() < 1e-12);
+    }
 
     #[test]
     fn movement_counts_only_new_replicas() {
