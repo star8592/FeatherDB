@@ -172,16 +172,16 @@ Fault tests:
 - Phase 1.1: complete for hash-ring / WRH / constrained-WRH comparison.
 - Phase 1.2: partial; movement, excess-join movement, replica counts, zone/rack collisions implemented.
 - Phase 1.3: partial; strong-node join and failure-domain-pressure scenarios implemented.
-- Tests: 13 passing.
+- Tests: 17 passing.
 - First experiment: `docs/experiments/2026-10-06-placement-baseline.md`.
 - ADR-0001: still Proposed.
 - ADR-0002: still Proposed.
 
-Next priority: stateful domain-aware placement planner, tablet resize state machine, compact simulator representation, then desired-vs-actual migration.
+Next priority: node-removal minimum-movement analysis, desired-vs-actual migration scheduler, tablet resize state machine, then compact million-tablet simulation.
 
 ### Placement planner hypothesis
 
-Experiment evidence now separates candidate ranking from final allocation. WRH is retained as a ranking/tie-break primitive; a stateful planner will optimize the committed desired tablet map against safety, capacity, stickiness, and movement cost. See `docs/architecture/PLACEMENT-PLANNER-v0.md`.
+Experiment evidence now separates candidate ranking from final allocation. WRH is retained as a ranking/tie-break primitive; the implemented quota-aware planner computes a deterministic desired tablet map against safety, capacity and stickiness. Physical movement remains a separate scheduler problem. See `docs/architecture/PLACEMENT-PLANNER-v0.md`.
 
 ## Immediate sprint
 

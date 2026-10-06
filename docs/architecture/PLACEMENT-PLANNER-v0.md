@@ -79,19 +79,63 @@ This is only the first feasibility model. Domain-aware capacity requires a hiera
 
 A new zone may justify more movement because it materially improves failure-domain redundancy. We measure **excess churn** separately from policy-required movement.
 
-## Candidate planner implementation
+## Current planner prototype
 
-The first planner prototype should be a simple deterministic greedy allocator, not a complex optimizer:
+The first single-move greedy prototype was deliberately discarded after simulation showed that it could get trapped in a locally valid but globally incomplete state during node removal and highly skewed joins.
 
-1. start from current placement;
-2. calculate normalized load vs feasible target;
-3. identify the most overloaded source and underloaded eligible target;
-4. consider tablets whose move preserves/improves failure-domain constraints;
-5. use WRH ranking as deterministic tie-break;
-6. apply one virtual move;
-7. repeat until within tolerance or movement budget is exhausted.
+The active research prototype now separates the problem into:
 
-This is intentionally stateful.
+1. calculate exact integer replica-count targets from feasible capacity;
+2. if strict zone diversity is feasible, allocate zone quotas first;
+3. allocate node quotas inside each chosen zone;
+4. prefer current replicas whenever quota feasibility allows;
+5. use WRH only as deterministic ranking/tie-breaking;
+6. run quota-preserving pair swaps to recover additional stickiness without changing final capacity or failure-domain guarantees.
+
+This produces a **desired map**. It does not perform physical migration.
+
+At 100,000 tablets, the prototype converges in all current join/leave/weight/domain scenarios with zero avoidable zone collisions and near-zero target error.
+
+### Movement optimality metric
+
+The planner records:
+
+    count_movement_lower_bound
+    actual_changed_replicas
+    movement_gap = actual - lower_bound
+
+The lower bound is intentionally weak: it only compares current node replica counts with target node replica counts and ignores per-tablet uniqueness and failure-domain constraints.
+
+Therefore:
+
+- gap = 0 is strong evidence of minimum movement for that scenario;
+- gap > 0 is a research signal, not proof of waste;
+- an exact minimum may require a constrained matching/min-cost-flow or augmenting-path model.
+
+Current 10K results:
+
+| Scenario | Moves | Count lower bound | Gap |
+|---|---:|---:|---:|
+| strong heterogeneous join | 10,000 | 10,000 | 0 |
+| heterogeneous leave | 3,931 | 3,499 | 432 |
+| weight 2 -> 6 | 2,887 | 2,817 | 70 |
+| new fourth failure domain | 4,285 | 4,285 | 0 |
+
+The node-removal gap is the next important planner optimization target.
+
+### Planner vs migration scheduler
+
+Do not reintroduce a move-rate budget into the planner.
+
+The planner answers:
+
+    What should the committed desired tablet map be?
+
+The migration scheduler answers:
+
+    How quickly and safely can actual placement approach it?
+
+This separation is now enforced architecturally.
 
 ## Research questions
 

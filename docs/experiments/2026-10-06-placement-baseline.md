@@ -234,3 +234,72 @@ This strengthens the current architecture split:
         -> stateful constraint/capacity planner
         -> desired placement
         -> bounded migration
+
+
+## Iteration 4 — stateful quota planner
+
+A stateful desired-map planner has now been implemented.
+
+The first one-move-at-a-time greedy version was rejected because it could stop in a local optimum:
+- strong join: one replica short of the exact target;
+- node removal: stale ownership could remain even though a globally valid solution existed.
+
+The replacement planner uses:
+- exact integer node quotas;
+- zone-first quotas when zone diversity is feasible;
+- current-placement stickiness;
+- WRH deterministic tie-breaking;
+- quota-preserving pair-swap repair.
+
+### Quality gate
+
+- `cargo test`: **17 passed, 0 failed**
+- `cargo clippy --all-targets --all-features -- -D warnings`: **pass**
+- `cargo fmt --check`: **pass**
+
+### 10K planner results
+
+| Scenario | Movement ratio | Moves | Count lower bound | Gap | Zone collisions | Target error |
+|---|---:|---:|---:|---:|---:|---:|
+| strong heterogeneous join | 0.500000 | 10,000 | 10,000 | *(0(* | 0 | 0.000043 |
+| heterogeneous leave | 0.196550 | 3,931 | 3,499 | 432 | 0 | 0.000000 |
+| weight 2 -> 6 | 0.144350 | 2,887 | 2,817 | 70 | 0 | 0.000053 |
+| fourth failure domain joins | 0.142833 | 4,285 | 4,285 | *(0(* | 0 | 0.000071 |
+
+The count lower bound ignores per-tablet uniqueness and failure-domain constraints, so a positive gap is not automatically avoidable churn.
+
+### 100K scale run
+
+The release binary ran the complete four-scenario comparison at 100,000 tablets in:
+
+- elapsed: **1.20 s**
+- peak RSS: **~35.6 MiB**
+
+Stateful planner results:
+
+| Scenario | Moves | Converged | Zone collisions | Target error |
+|---|---:|---|---:|---:|
+| strong heterogeneous join | 100,000 | yes | 0 | 0.000004 |
+| heterogeneous leave | 38,746 before final lower-bound instrumentation run; exact target achieved | yes | 0 | 0.000000 |
+| weight change | 29,028 | yes | 0 | 0.000005 |
+| fourth failure domain | 42,857 | yes | 0 | 0.000009 |
+
+The simulator remains lightweight enough for 100K-tablet research. Million-tablet compact representation is still required before churn/fault campaigns.
+
+### Architecture conclusion
+
+The experiment now supports a stronger split:
+
+    WRH candidate ranking
+        -> quota/constraint-aware desired-map planner
+        -> committed desired tablet map
+        -> bounded migration scheduler
+        -> actual tablet map
+
+WRH remains useful, but the desired map is no longer assumed to be the direct output of a stateless hash function.
+
+ADR-0002 remains Proposed because:
+- node-removal movement optimality is not yet understood;
+- rack-aware target feasibility is still incomplete;
+- unequal tablet bytes/hotness are not modeled;
+- split/merge lifecycle is not executable yet.

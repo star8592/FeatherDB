@@ -118,6 +118,8 @@ Capacity fairness must be measured against a feasible target that accounts for:
 
 See `docs/experiments/2026-10-06-placement-baseline.md`.
 
+A quota-aware planner prototype now converges on the current join/leave/weight/failure-domain scenarios while retaining WRH only for deterministic ranking. Strong join and fourth-domain join reach the current count-based movement lower bound; node removal still has a measurable movement gap and therefore remains an open optimization problem.
+
 ## Tablet lifecycle evidence
 
 Official ScyllaDB and TiKV documentation confirms that production partition units need dynamic split/merge control and anti-oscillation/resource limits. ADR-0002 therefore also requires a tablet lifecycle policy with hysteresis, cooldown, and metadata-budget validation.

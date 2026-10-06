@@ -1,9 +1,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use crate::hash::{hash_pair, unit_interval_open};
-use crate::metrics::{
-    feasible_capacity_inclusion_targets, zone_aware_capacity_inclusion_targets,
-};
+use crate::metrics::{feasible_capacity_inclusion_targets, zone_aware_capacity_inclusion_targets};
 use crate::model::{Cluster, Node, NodeId, Placement, Tablet, TabletId};
 use crate::placement::FailureDomainPolicy;
 
@@ -11,6 +9,8 @@ use crate::placement::FailureDomainPolicy;
 pub struct PlannerResult {
     pub placement: Placement,
     pub moves: usize,
+    pub movement_lower_bound: usize,
+    pub movement_gap: usize,
     pub converged: bool,
 }
 
@@ -20,12 +20,16 @@ pub fn plan_rebalance(
     policy: FailureDomainPolicy,
 ) -> PlannerResult {
     let targets = integer_target_counts(cluster, policy);
-    let placement = if policy.distinct_zones && eligible_zone_count(cluster) >= target_replica_count(cluster)
-    {
-        plan_with_zone_quotas(cluster, current, &targets)
-    } else {
-        plan_with_node_quotas(cluster, current, &targets, policy)
-    };
+    let mut placement =
+        if policy.distinct_zones && eligible_zone_count(cluster) >= target_replica_count(cluster) {
+            plan_with_zone_quotas(cluster, current, &targets)
+        } else {
+            plan_with_node_quotas(cluster, current, &targets, policy)
+        };
+
+    if let Some(desired) = placement.as_mut() {
+        improve_stickiness(cluster, current, desired, policy);
+    }
 
     let converged = placement
         .as_ref()
@@ -33,10 +37,14 @@ pub fn plan_rebalance(
 
     let placement = placement.unwrap_or_else(|| current.clone());
     let moves = changed_replica_count(current, &placement, &cluster.tablets);
+    let movement_lower_bound = count_movement_lower_bound(current, &targets);
+    let movement_gap = moves.saturating_sub(movement_lower_bound);
 
     PlannerResult {
         placement,
         moves,
+        movement_lower_bound,
+        movement_gap,
         converged,
     }
 }
@@ -102,8 +110,7 @@ fn plan_with_zone_quotas(
             .filter(|node| node.eligible())
             .map(|node| node.zone.clone())
             .filter(|zone| {
-                zone_remaining.get(zone).copied().unwrap_or(0) > 0
-                    && !selected_zones.contains(zone)
+                zone_remaining.get(zone).copied().unwrap_or(0) > 0 && !selected_zones.contains(zone)
             })
             .collect();
         current_zones.sort();
@@ -127,9 +134,7 @@ fn plan_with_zone_quotas(
         if selected_zones.len() < rf {
             let mut other_zones: Vec<_> = zone_remaining
                 .iter()
-                .filter(|(zone, remaining)| {
-                    **remaining > 0 && !selected_zones.contains(zone)
-                })
+                .filter(|(zone, remaining)| **remaining > 0 && !selected_zones.contains(zone))
                 .map(|(zone, remaining)| {
                     (
                         *remaining,
@@ -178,13 +183,7 @@ fn plan_with_zone_quotas(
             let target = if let Some(node_id) = forced_node {
                 node_id
             } else {
-                choose_node_in_zone(
-                    cluster,
-                    tablet.id,
-                    &zone,
-                    old,
-                    &node_remaining,
-                )?
+                choose_node_in_zone(cluster, tablet.id, &zone, old, &node_remaining)?
             };
 
             replicas.push(target);
@@ -354,13 +353,13 @@ fn node_allowed(
 
     let node = &cluster.nodes[&candidate];
 
-    if policy.distinct_zones && eligible_zone_count(cluster) >= target_replica_count(cluster) {
-        if selected
+    if policy.distinct_zones
+        && eligible_zone_count(cluster) >= target_replica_count(cluster)
+        && selected
             .iter()
             .any(|node_id| cluster.nodes[node_id].zone == node.zone)
-        {
-            return false;
-        }
+    {
+        return false;
     }
 
     if policy.distinct_racks {
@@ -380,6 +379,206 @@ fn node_allowed(
             })
         {
             return false;
+        }
+    }
+
+    true
+}
+
+fn improve_stickiness(
+    cluster: &Cluster,
+    current: &Placement,
+    desired: &mut Placement,
+    policy: FailureDomainPolicy,
+) {
+    for _ in 0..8 {
+        let mut opportunities = BTreeMap::<(NodeId, NodeId), Vec<TabletId>>::new();
+
+        for tablet in &cluster.tablets {
+            let old = current
+                .replicas
+                .get(&tablet.id)
+                .map(Vec::as_slice)
+                .unwrap_or(&[]);
+            let assigned = desired
+                .replicas
+                .get(&tablet.id)
+                .map(Vec::as_slice)
+                .unwrap_or(&[]);
+
+            for assigned_node in assigned {
+                for old_node in old {
+                    if !assigned.contains(old_node) {
+                        opportunities
+                            .entry((*assigned_node, *old_node))
+                            .or_default()
+                            .push(tablet.id);
+                    }
+                }
+            }
+        }
+
+        let mut used = BTreeSet::new();
+        let mut swaps = Vec::new();
+
+        for tablet in &cluster.tablets {
+            if used.contains(&tablet.id) {
+                continue;
+            }
+
+            let old_a = current
+                .replicas
+                .get(&tablet.id)
+                .map(Vec::as_slice)
+                .unwrap_or(&[]);
+            let assigned_a = desired
+                .replicas
+                .get(&tablet.id)
+                .cloned()
+                .unwrap_or_default();
+
+            let bad_a: Vec<_> = assigned_a
+                .iter()
+                .copied()
+                .filter(|node_id| !old_a.contains(node_id))
+                .collect();
+            let missing_a: Vec<_> = old_a
+                .iter()
+                .copied()
+                .filter(|node_id| !assigned_a.contains(node_id))
+                .collect();
+
+            let mut found = None;
+
+            'search: for assigned_x in bad_a {
+                for old_y in &missing_a {
+                    let Some(candidates) = opportunities.get(&(*old_y, assigned_x)) else {
+                        continue;
+                    };
+
+                    for tablet_b in candidates {
+                        if *tablet_b == tablet.id || used.contains(tablet_b) {
+                            continue;
+                        }
+
+                        let assigned_b =
+                            desired.replicas.get(tablet_b).cloned().unwrap_or_default();
+
+                        if !assigned_b.contains(old_y) || assigned_b.contains(&assigned_x) {
+                            continue;
+                        }
+
+                        let mut next_a = assigned_a.clone();
+                        let Some(slot_a) =
+                            next_a.iter_mut().find(|node_id| **node_id == assigned_x)
+                        else {
+                            continue;
+                        };
+                        *slot_a = *old_y;
+                        next_a.sort_unstable();
+
+                        let mut next_b = assigned_b.clone();
+                        let Some(slot_b) = next_b.iter_mut().find(|node_id| **node_id == *old_y)
+                        else {
+                            continue;
+                        };
+                        *slot_b = assigned_x;
+                        next_b.sort_unstable();
+
+                        if !replica_set_respects_policy(cluster, &next_a, policy)
+                            || !replica_set_respects_policy(cluster, &next_b, policy)
+                        {
+                            continue;
+                        }
+
+                        let old_b = current
+                            .replicas
+                            .get(tablet_b)
+                            .map(Vec::as_slice)
+                            .unwrap_or(&[]);
+
+                        let before =
+                            changed_slots(old_a, &assigned_a) + changed_slots(old_b, &assigned_b);
+                        let after = changed_slots(old_a, &next_a) + changed_slots(old_b, &next_b);
+
+                        if after < before {
+                            found = Some((tablet.id, next_a, *tablet_b, next_b));
+                            break 'search;
+                        }
+                    }
+                }
+            }
+
+            if let Some((tablet_a, next_a, tablet_b, next_b)) = found {
+                used.insert(tablet_a);
+                used.insert(tablet_b);
+                swaps.push((tablet_a, next_a, tablet_b, next_b));
+            }
+        }
+
+        if swaps.is_empty() {
+            break;
+        }
+
+        for (tablet_a, next_a, tablet_b, next_b) in swaps {
+            desired.replicas.insert(tablet_a, next_a);
+            desired.replicas.insert(tablet_b, next_b);
+        }
+    }
+}
+
+fn changed_slots(old: &[NodeId], new: &[NodeId]) -> usize {
+    new.iter().filter(|node_id| !old.contains(node_id)).count()
+}
+
+fn replica_set_respects_policy(
+    cluster: &Cluster,
+    replicas: &[NodeId],
+    policy: FailureDomainPolicy,
+) -> bool {
+    if replicas.iter().collect::<BTreeSet<_>>().len() != replicas.len() {
+        return false;
+    }
+
+    if replicas.iter().any(|node_id| {
+        !cluster
+            .nodes
+            .get(node_id)
+            .is_some_and(|node| node.eligible())
+    }) {
+        return false;
+    }
+
+    if policy.distinct_zones && eligible_zone_count(cluster) >= replicas.len() {
+        let zones = replicas
+            .iter()
+            .map(|node_id| cluster.nodes[node_id].zone.as_str())
+            .collect::<BTreeSet<_>>();
+        if zones.len() != replicas.len() {
+            return false;
+        }
+    }
+
+    if policy.distinct_racks {
+        let eligible_racks = cluster
+            .nodes
+            .values()
+            .filter(|node| node.eligible())
+            .map(|node| (node.zone.as_str(), node.rack.as_str()))
+            .collect::<BTreeSet<_>>()
+            .len();
+
+        if eligible_racks >= replicas.len() {
+            let racks = replicas
+                .iter()
+                .map(|node_id| {
+                    let node = &cluster.nodes[node_id];
+                    (node.zone.as_str(), node.rack.as_str())
+                })
+                .collect::<BTreeSet<_>>();
+            if racks.len() != replicas.len() {
+                return false;
+            }
         }
     }
 
@@ -412,10 +611,7 @@ fn integer_target_counts(
         remainders.push((exact - floor as f64, node_id));
     }
 
-    remainders.sort_by(|a, b| {
-        b.0.total_cmp(&a.0)
-            .then_with(|| a.1.cmp(&b.1))
-    });
+    remainders.sort_by(|a, b| b.0.total_cmp(&a.0).then_with(|| a.1.cmp(&b.1)));
 
     for (_, node_id) in remainders
         .into_iter()
@@ -446,16 +642,27 @@ fn target_counts_match(
     }
 
     cluster.nodes.keys().all(|node_id| {
-        counts.get(node_id).copied().unwrap_or(0)
-            == targets.get(node_id).copied().unwrap_or(0)
+        counts.get(node_id).copied().unwrap_or(0) == targets.get(node_id).copied().unwrap_or(0)
     })
 }
 
-fn changed_replica_count(
-    before: &Placement,
-    after: &Placement,
-    tablets: &[Tablet],
-) -> usize {
+fn count_movement_lower_bound(current: &Placement, targets: &BTreeMap<NodeId, usize>) -> usize {
+    let mut current_counts = BTreeMap::<NodeId, usize>::new();
+    for replicas in current.replicas.values() {
+        for node_id in replicas {
+            *current_counts.entry(*node_id).or_default() += 1;
+        }
+    }
+
+    targets
+        .iter()
+        .map(|(node_id, target)| {
+            target.saturating_sub(current_counts.get(node_id).copied().unwrap_or(0))
+        })
+        .sum()
+}
+
+fn changed_replica_count(before: &Placement, after: &Placement, tablets: &[Tablet]) -> usize {
     tablets
         .iter()
         .map(|tablet| {
@@ -517,8 +724,8 @@ mod tests {
             .collect::<BTreeMap<_, _>>(),
             tablets: tablets(10_000),
         };
-        let current = PlacementStrategy::WeightedRendezvous
-            .place(&before, FailureDomainPolicy::HIERARCHICAL);
+        let current =
+            PlacementStrategy::WeightedRendezvous.place(&before, FailureDomainPolicy::HIERARCHICAL);
 
         let mut after = before.clone();
         after.epoch = 2;
@@ -549,8 +756,8 @@ mod tests {
             .collect::<BTreeMap<_, _>>(),
             tablets: tablets(10_000),
         };
-        let current = PlacementStrategy::WeightedRendezvous
-            .place(&before, FailureDomainPolicy::HIERARCHICAL);
+        let current =
+            PlacementStrategy::WeightedRendezvous.place(&before, FailureDomainPolicy::HIERARCHICAL);
 
         let mut after = before.clone();
         after.nodes.get_mut(&2).unwrap().state = AdminState::Removed;
@@ -586,8 +793,8 @@ mod tests {
             tablets: tablets(10_000),
         };
 
-        let current = PlacementStrategy::WeightedRendezvous
-            .place(&before, FailureDomainPolicy::HIERARCHICAL);
+        let current =
+            PlacementStrategy::WeightedRendezvous.place(&before, FailureDomainPolicy::HIERARCHICAL);
 
         let mut after = before.clone();
         after.epoch = 2;
@@ -625,6 +832,8 @@ mod tests {
 
         assert_eq!(a.placement, b.placement);
         assert_eq!(a.moves, b.moves);
+        assert_eq!(a.movement_lower_bound, b.movement_lower_bound);
+        assert_eq!(a.movement_gap, b.movement_gap);
         assert_eq!(a.converged, b.converged);
     }
 }
