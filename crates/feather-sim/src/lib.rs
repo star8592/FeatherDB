@@ -4,6 +4,7 @@ mod hash;
 pub mod metrics;
 pub mod model;
 pub mod placement;
+pub mod planner;
 
 pub use metrics::{
     JoinMovementBreakdown, PlacementMetrics, TransitionMovementBreakdown,
@@ -12,3 +13,4 @@ pub use metrics::{
 };
 pub use model::{AdminState, Cluster, Node, NodeId, Placement, Tablet, TabletId};
 pub use placement::{FailureDomainPolicy, PlacementStrategy};
+pub use planner::{PlannerResult, plan_rebalance};
