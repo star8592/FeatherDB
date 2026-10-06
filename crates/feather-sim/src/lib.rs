@@ -6,6 +6,7 @@ pub mod migration;
 pub mod model;
 pub mod placement;
 pub mod planner;
+pub mod range_resize;
 pub mod resize;
 
 pub use metrics::{
@@ -24,4 +25,10 @@ pub use planner::{PlannerResult, plan_rebalance};
 pub use resize::{
     ResizeBlockReason, ResizeCommitOutcome, ResizeConfigError, ResizeDecision, ResizeKind,
     ResizePlan, TabletResizePolicy, TabletResizeState,
+};
+
+pub use range_resize::{
+    HASH_SPACE_END, LifecycleResizeDecision, LifecycleResizeError, LifecycleResizePlan,
+    RangeCommitOutcome, RangeResizeError, RangeResizeKind, RangeResizePlan, RangeTablet,
+    RangeTabletMap, TabletRangeLifecycle,
 };

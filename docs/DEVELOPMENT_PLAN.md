@@ -72,6 +72,26 @@ Exit gate for ADR-0002 candidate:
 - weight-proportional responsibility within documented tolerance;
 - no algorithm selected solely from one happy-path benchmark.
 
+### Physical range-resize implementation status
+
+Implemented:
+
+- exact [0, 2^64) range coverage model;
+- midpoint split with byte conservation;
+- adjacent-pair merge;
+- replica-equality requirement before merge;
+- topology-epoch and generation fencing;
+- replay-safe commits;
+- TabletRangeLifecycle as the single coordinated controller + physical-map entrypoint.
+
+See docs/experiments/2026-10-07-range-resize.md.
+
+Still open:
+
+- data-aware vs midpoint split-boundary policy;
+- integration with migration while resize and placement change concurrently;
+- deterministic crash injection at every resize transition.
+
 ### Tablet lifecycle track
 
 Logical split/merge control now implements hysteresis, cooldown, metadata-budget limits, generation/topology fencing, and crash-replay idempotency. Physical key-range split/merge execution remains open before ADR-0002 acceptance. See docs/architecture/TABLET-LIFECYCLE-v0.md.
@@ -219,7 +239,7 @@ Fault tests:
 - ADR-0001: still Proposed.
 - ADR-0002: still Proposed.
 
-Next priority: physical key-range resize execution, deterministic fault events, then compact million-tablet simulation.
+Next priority: deterministic fault events, split-boundary strategy experiments, then compact million-tablet simulation.
 
 ### Placement planner hypothesis
 

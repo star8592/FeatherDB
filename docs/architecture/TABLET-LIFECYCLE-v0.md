@@ -200,3 +200,138 @@ Physical split/merge execution still needs its own transition states and crash-i
 See:
 
     docs/experiments/2026-10-07-tablet-resize-controller.md
+
+
+## Physical range-map execution
+
+The simulator now has an executable RangeTabletMap and TabletRangeLifecycle.
+
+A range tablet contains:
+
+    tablet_id
+    [start, end) over the 64-bit hash space
+    bytes
+    canonical replica set
+
+The full hash space is represented as:
+
+    [0, 2^64)
+
+and every committed map must cover it exactly once with no gaps or overlaps.
+
+### Split
+
+The current research split operation divides every logical range at its midpoint.
+
+For a parent:
+
+    [start, end)
+
+children become:
+
+    [start, midpoint)
+    [midpoint, end)
+
+Replica ownership is inherited unchanged at split time.
+
+Bytes are divided conservatively:
+
+    left = floor(parent_bytes / 2)
+    right = parent_bytes - left
+
+so total bytes are preserved exactly.
+
+### Merge
+
+Merge currently operates only on adjacent pairs.
+
+A pair can merge only when:
+
+- left.end == right.start;
+- both ranges have exactly the same canonical replica set;
+- byte addition does not overflow.
+
+If replica sets differ, merge is rejected. The placement/migration layer must first reconcile ownership.
+
+### Single public lifecycle entrypoint
+
+External callers use TabletRangeLifecycle rather than directly committing RangeTabletMap mutations.
+
+TabletRangeLifecycle derives the resize controller state from the physical map:
+
+    generation
+    tablet_count
+    last_resize_tick
+
+and produces one LifecycleResizePlan containing both:
+
+    ResizePlan
+    RangeResizePlan
+
+The commit path clones lifecycle state, validates the physical transform, and only swaps the candidate state into place after the full transform succeeds.
+
+This prevents a split-brain inside metadata such as:
+
+    logical tablet_count = 16
+    physical range count = 8
+
+### Fencing and replay
+
+Every range resize plan carries:
+
+    topology_epoch
+    from_generation
+    from_count
+    from_next_tablet_id
+
+Commit checks all of them.
+
+Current executable behavior:
+
+- stale topology epoch -> no change;
+- stale generation -> no change;
+- identical replay after successful commit -> AlreadyApplied;
+- tampered boundaries -> InvalidPlan;
+- replica mismatch on merge -> rejected without partial commit.
+
+### Current lab
+
+The range-resize lab starts with one range holding 10,000 bytes and replicas [1,2,3].
+
+It repeatedly grows to 64 tablets and then shrinks back to one.
+
+Observed:
+
+    start:
+      count=1
+      generation=0
+      bytes=10000
+
+    after growth:
+      count=64
+      generation=6
+      bytes=10000
+
+    after shrink:
+      count=1
+      generation=12
+      bytes=10000
+      range=[0, 2^64)
+      replicas=[1,2,3]
+
+All sampled tokens remained routable throughout the sequence.
+
+### Important limitation
+
+Midpoint split is currently a control-plane correctness baseline, not the final production split-boundary policy.
+
+Future work must compare:
+
+- midpoint hash-space split;
+- data-size-aware split;
+- hot-key / traffic-aware split.
+
+The invariant to preserve is stronger than the exact boundary algorithm:
+
+    every committed generation has total, non-overlapping hash-space coverage
+    and deterministic routing.
