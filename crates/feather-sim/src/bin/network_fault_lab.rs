@@ -92,7 +92,13 @@ fn main() {
             feather_sim::FaultAction::ReorderNext { .. } => reorder += 1,
             feather_sim::FaultAction::Partition { .. } => partition += 1,
             feather_sim::FaultAction::Heal { .. } => heal += 1,
-            feather_sim::FaultAction::SetNodeHealth { .. } => {}
+            feather_sim::FaultAction::SetNodeHealth { .. }
+            | feather_sim::FaultAction::SetDiskFull { .. }
+            | feather_sim::FaultAction::SetDiskDelay { .. }
+            | feather_sim::FaultAction::DiskFailNext { .. }
+            | feather_sim::FaultAction::CorruptNextDiskRead { .. }
+            | feather_sim::FaultAction::CorruptNextDiskWrite { .. }
+            | feather_sim::FaultAction::CrashDisk { .. } => {}
         }
     }
 

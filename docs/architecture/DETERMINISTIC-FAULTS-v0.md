@@ -115,7 +115,7 @@ V2 supports:
 
 Example:
 
-    feather-fault-trace-v2,<seed>
+    feather-fault-trace-v3,<seed>
     <tick>,<sequence>,link-delay,<from>,<to>,<ticks>
     <tick>,<sequence>,partition,<a>,<b>,<bidirectional>
 
@@ -266,3 +266,23 @@ The network fault substrate is no longer migration-only. SimNetwork now provides
 A protocol-independent replay harness runs ScheduledMessage workloads against FaultTrace V2 and records deterministic delivery traces and queue peaks.
 
 See docs/architecture/DETERMINISTIC-MESSAGE-BUS-v0.md and docs/experiments/2026-10-07-message-bus.md.
+
+
+## V3 node-scoped disk faults
+
+FaultTrace V3 extends the same deterministic timeline with node-scoped storage actions:
+
+    SetDiskFull(node, bool)
+    SetDiskDelay(node, ticks)
+    DiskFailNext(node, count)
+    CorruptNextDiskRead(node, count)
+    CorruptNextDiskWrite(node, count)
+    CrashDisk(node)
+
+V1 health-only traces and V2 network traces remain readable. Newly serialized traces use V3.
+
+Network and disk application are deliberately separate: apply_network_fault_action ignores disk actions, while apply_disk_fault_action targets a BTreeMap<NodeId, SimDisk>. A whole-cluster harness may feed the same ordered event stream to both physical surfaces.
+
+A deterministic generator now produces bounded disk-full/slow/failure/corruption/crash episodes by seed.
+
+The first combined campaign executes membership churn, process crash/restart, network faults, and per-node disk faults on the same trace. See docs/experiments/2026-10-07-cross-fault.md.

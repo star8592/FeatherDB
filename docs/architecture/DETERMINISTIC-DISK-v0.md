@@ -223,3 +223,12 @@ The key rule remains:
 
     protocol code owns correctness;
     the simulator controls physical nondeterminism.
+
+
+## Common FaultTrace V3 integration
+
+SimDisk fault controls are now addressable through the common FaultTrace stream. Disk events are node-scoped and can coexist with network events in one replay timeline.
+
+The first combined campaign starts durable writers while disk faults are active; four of fifty durable records require checksum/missing-record repair after the bounded fault period, demonstrating that the fault stream reaches real Put/Sync paths.
+
+RuntimeCoordinator is not yet connected to the scalar ControlRecord because epoch/generation alone is insufficient replay material for crash-safe topology/resize commit. See docs/architecture/DURABLE-TOPOLOGY-COMMIT-v0.md.

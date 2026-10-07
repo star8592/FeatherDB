@@ -36,7 +36,8 @@ pub use disk::{
 
 pub use fault::{
     FaultAction, FaultEvent, FaultReplayReport, FaultTrace, FaultTraceParseError,
-    apply_network_fault_action, replay_migration_faults, replay_migration_faults_with_network,
+    apply_disk_fault_action, apply_network_fault_action, replay_migration_faults,
+    replay_migration_faults_with_network,
 };
 
 pub use membership::{

@@ -316,12 +316,12 @@ Fault tests:
 - Phase 1.3: partial; strong-node join and failure-domain-pressure scenarios implemented.
 - RF=2 single-node removal movement now matches a failure-domain-aware constrained lower bound exactly.
 - Tablet resize controller: logical count control implemented with hysteresis, cooldown, metadata budget, epoch/generation fencing, and replay idempotency.
-- Tests: 173 passing.
+- Tests: 177 passing.
 - First experiment: `docs/experiments/2026-10-06-placement-baseline.md`.
 - ADR-0001: still Proposed.
 - ADR-0002: still Proposed.
 
-Next priority: node-scoped disk faults in the common trace, durable RuntimeCoordinator metadata, simultaneous crash+join+leave+disk churn, then production-substrate benchmarks.
+Next priority: replayable topology snapshot/transaction encoding for durable RuntimeCoordinator commits, crash-at-every-edge recovery tests, then Fjall/redb and QUIC production-substrate benchmarks.
 
 ### Placement planner hypothesis
 
