@@ -4,6 +4,7 @@ pub mod compact;
 pub mod compact_catalog;
 pub mod compact_migration;
 pub mod compact_window;
+pub mod disk;
 pub mod fault;
 mod hash;
 pub mod membership;
@@ -25,6 +26,12 @@ pub use compact_catalog::{CompactCatalogError, CompactTabletCatalog};
 pub use compact_migration::{CompactMigrationCursor, CompactMigrationMove};
 pub use compact_window::{
     CompactWindowError, CompactWindowPhase, CompactWindowReconcileReport, CompactWindowScheduler,
+};
+
+pub use disk::{
+    ControlCommitState, ControlRecord, DirectMemoryStore, DiskCompletion, DiskError, DiskOpId,
+    DiskPoll, DiskRequest, DiskSubmit, DurableControlWriter, DurableStore, SimDisk,
+    read_control_record,
 };
 
 pub use fault::{
