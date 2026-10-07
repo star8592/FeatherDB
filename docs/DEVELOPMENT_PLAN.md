@@ -316,12 +316,12 @@ Fault tests:
 - Phase 1.3: partial; strong-node join and failure-domain-pressure scenarios implemented.
 - RF=2 single-node removal movement now matches a failure-domain-aware constrained lower bound exactly.
 - Tablet resize controller: logical count control implemented with hysteresis, cooldown, metadata budget, epoch/generation fencing, and replay idempotency.
-- Tests: 194 passing.
+- Tests: 201 passing.
 - First experiment: `docs/experiments/2026-10-06-placement-baseline.md`.
 - ADR-0001: still Proposed.
 - ADR-0002: still Proposed.
 
-Next priority: route topology-epoch membership changes through the same durable transaction serialization, add PREPARED garbage collection, then Fjall/redb and QUIC production-substrate benchmarks.
+Next priority: PREPARED garbage collection/transaction serialization hardening, then Fjall/redb and QUIC production-substrate benchmarks.
 
 ### Placement planner hypothesis
 

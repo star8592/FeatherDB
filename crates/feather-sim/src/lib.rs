@@ -37,7 +37,8 @@ pub use disk::{
 };
 
 pub use durable_runtime::{
-    DurableResizeError, DurableResizeProgress, DurableResizeTransaction, RecoveredTabletRuntime,
+    DurableResizeError, DurableResizeProgress, DurableResizeTransaction,
+    DurableTopologyChangeError, DurableTopologyChangeTransaction, RecoveredTabletRuntime,
     recover_tablet_runtime,
 };
 

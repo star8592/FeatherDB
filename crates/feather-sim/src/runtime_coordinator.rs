@@ -11,7 +11,7 @@ use crate::range_resize::{
     RangeResizeError, TabletRangeLifecycle,
 };
 use crate::resize::{ResizeBlockReason, ResizeKind, TabletResizePolicy};
-use crate::topology_snapshot::TopologySnapshot;
+use crate::topology_snapshot::{TopologySnapshot, TopologySnapshotError};
 use crate::transport::{DirectMigrationTransport, MigrationTransport};
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -47,6 +47,7 @@ pub enum TabletRuntimeError {
     Migration(CompactWindowError),
     Lifecycle(LifecycleResizeError),
     Range(RangeResizeError),
+    Snapshot(TopologySnapshotError),
     ShapeMismatch,
     TopologyEpochMismatch { runtime: u64, requested: u64 },
 }
@@ -78,6 +79,12 @@ impl From<LifecycleResizeError> for TabletRuntimeError {
 impl From<RangeResizeError> for TabletRuntimeError {
     fn from(value: RangeResizeError) -> Self {
         Self::Range(value)
+    }
+}
+
+impl From<TopologySnapshotError> for TabletRuntimeError {
+    fn from(value: TopologySnapshotError) -> Self {
+        Self::Snapshot(value)
     }
 }
 
@@ -129,18 +136,12 @@ impl TabletRuntimeCoordinator {
     }
 
     pub fn from_topology_snapshot(
-        cluster: Cluster,
         snapshot: TopologySnapshot,
         placement_policy: FailureDomainPolicy,
         migration_budget: MigrationBudget,
         window_tablets: usize,
     ) -> Result<Self, TabletRuntimeError> {
-        if cluster.epoch != snapshot.topology_epoch() {
-            return Err(TabletRuntimeError::TopologyEpochMismatch {
-                runtime: snapshot.topology_epoch(),
-                requested: cluster.epoch,
-            });
-        }
+        let cluster = snapshot.cluster();
         Self::new(
             cluster,
             snapshot.into_lifecycle(),
@@ -152,10 +153,10 @@ impl TabletRuntimeCoordinator {
 
     pub fn capture_topology_snapshot(&mut self) -> Result<TopologySnapshot, TabletRuntimeError> {
         self.sync_committed_replicas_to_range_map()?;
-        Ok(TopologySnapshot::from_lifecycle(
-            self.migration.topology_epoch(),
+        Ok(TopologySnapshot::from_runtime(
+            self.migration.cluster(),
             &self.lifecycle,
-        ))
+        )?)
     }
 
     pub fn migration(&self) -> &CompactWindowScheduler {

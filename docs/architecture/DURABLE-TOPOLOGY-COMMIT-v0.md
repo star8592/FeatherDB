@@ -141,3 +141,53 @@ DiskFull is separately tested both before PREPARED and during CURRENT publicatio
 ### Serialization assumption
 
 This v0 path assumes one serialized durable topology transaction at a time. A concurrent independently committed topology epoch while a PREPARED resize exists would produce RecoveryConflict rather than guessing an order. Future control-plane consensus must serialize these transactions explicitly.
+
+
+## Full control-plane snapshot (FTS2)
+
+The durable snapshot has been upgraded from range-only replay material to full control-plane topology replay material. FTS2 stores:
+
+    TopologyEpoch
+    replication factor
+    ordered node map
+      NodeId
+      weight
+      zone
+      rack
+      AdminState
+    RangeTabletMap generation
+    next TabletId
+    resize cooldown state
+    stable tablet IDs / ranges / bytes / replicas
+    checksum
+
+This removes an unsafe recovery dependency where callers previously had to supply an external Cluster matching the durable epoch. Runtime recovery now reconstructs Cluster directly from the snapshot.
+
+The snapshot codec is deterministic because nodes are serialized in BTreeMap order and range tablets are serialized in canonical range order.
+
+## Durable topology-epoch change
+
+The same PREPARED/CURRENT transaction protocol now handles node-topology changes as well as resize.
+
+For a topology change:
+
+    current full snapshot
+      -> replace cluster topology with explicit proposed Cluster
+      -> PREPARED + Sync
+      -> RuntimeCoordinator.reconcile_topology()
+      -> verify full applied snapshot == prepared target
+      -> CURRENT + Sync
+
+A higher TopologyEpoch with unchanged catalog generation is a valid forward transition. Equal or older epochs are rejected before PREPARED.
+
+A crash after PREPARED but before reconcile reconstructs the new Cluster directly from the target snapshot and regenerates ownership migration from recovered actual ranges plus new placement policy.
+
+## Failure detector authority boundary
+
+SWIM membership state is now covered by an executable integration invariant:
+
+    Dead / Left observation != ownership authority
+
+A test crashes a node until all live SWIM observers classify it Dead. RuntimeCoordinator remains on the old TopologyEpoch and the node remains Active in durable cluster metadata. Only an explicit durable topology transaction advances the epoch, changes AdminState to Removed, and triggers ownership Repair.
+
+This keeps failure evidence and ownership authority deliberately separated.

@@ -11,7 +11,7 @@ pub enum AdminState {
     Removed,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Node {
     pub id: NodeId,
     pub weight: u32,
@@ -26,7 +26,7 @@ impl Node {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Tablet {
     pub id: TabletId,
     pub bytes: u64,
@@ -37,7 +37,7 @@ pub struct Placement {
     pub replicas: BTreeMap<TabletId, Vec<NodeId>>,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Cluster {
     pub epoch: u64,
     pub replication_factor: usize,

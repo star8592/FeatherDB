@@ -1,15 +1,24 @@
+use std::collections::BTreeMap;
+
+use crate::model::{AdminState, Cluster, Node, NodeId, Tablet};
 use crate::range_resize::{RangeResizeError, RangeTablet, RangeTabletMap, TabletRangeLifecycle};
 
-const SNAPSHOT_MAGIC: [u8; 4] = *b"FTS1";
-const SNAPSHOT_FIXED_BYTES: usize = 4 + 8 + 8 + 8 + 1 + 8 + 4 + 8;
+const SNAPSHOT_MAGIC: [u8; 4] = *b"FTS2";
+const SNAPSHOT_MIN_BYTES: usize = 4 + 8 + 4 + 4 + 8 + 8 + 1 + 8 + 4 + 8;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum TopologySnapshotError {
     InvalidLength,
     InvalidMagic,
     InvalidChecksum,
+    InvalidUtf8,
+    InvalidAdminState,
+    InvalidNodeMap,
+    TooManyNodes,
     TooManyTablets,
     TooManyReplicas,
+    StringTooLong,
+    ReplicationFactorOverflow,
     Range(RangeResizeError),
 }
 
@@ -22,6 +31,8 @@ impl From<RangeResizeError> for TopologySnapshotError {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct TopologySnapshot {
     topology_epoch: u64,
+    replication_factor: u32,
+    nodes: BTreeMap<NodeId, Node>,
     lifecycle: TabletRangeLifecycle,
 }
 
@@ -29,6 +40,8 @@ impl TopologySnapshot {
     pub fn new(topology_epoch: u64, lifecycle: TabletRangeLifecycle) -> Self {
         Self {
             topology_epoch,
+            replication_factor: 0,
+            nodes: BTreeMap::new(),
             lifecycle,
         }
     }
@@ -37,8 +50,37 @@ impl TopologySnapshot {
         Self::new(topology_epoch, lifecycle.clone())
     }
 
+    pub fn from_runtime(
+        cluster: &Cluster,
+        lifecycle: &TabletRangeLifecycle,
+    ) -> Result<Self, TopologySnapshotError> {
+        let replication_factor = u32::try_from(cluster.replication_factor)
+            .map_err(|_| TopologySnapshotError::ReplicationFactorOverflow)?;
+        if cluster
+            .nodes
+            .iter()
+            .any(|(node_id, node)| *node_id != node.id)
+        {
+            return Err(TopologySnapshotError::InvalidNodeMap);
+        }
+        Ok(Self {
+            topology_epoch: cluster.epoch,
+            replication_factor,
+            nodes: cluster.nodes.clone(),
+            lifecycle: lifecycle.clone(),
+        })
+    }
+
     pub fn topology_epoch(&self) -> u64 {
         self.topology_epoch
+    }
+
+    pub fn replication_factor(&self) -> usize {
+        self.replication_factor as usize
+    }
+
+    pub fn nodes(&self) -> &BTreeMap<NodeId, Node> {
+        &self.nodes
     }
 
     pub fn lifecycle(&self) -> &TabletRangeLifecycle {
@@ -49,16 +91,88 @@ impl TopologySnapshot {
         self.lifecycle
     }
 
+    pub fn cluster(&self) -> Cluster {
+        Cluster {
+            epoch: self.topology_epoch,
+            replication_factor: self.replication_factor(),
+            nodes: self.nodes.clone(),
+            tablets: self
+                .lifecycle
+                .map()
+                .tablets()
+                .iter()
+                .map(|tablet| Tablet {
+                    id: tablet.id,
+                    bytes: tablet.bytes,
+                })
+                .collect(),
+        }
+    }
+
+    pub fn with_lifecycle(&self, lifecycle: TabletRangeLifecycle) -> Self {
+        Self {
+            topology_epoch: self.topology_epoch,
+            replication_factor: self.replication_factor,
+            nodes: self.nodes.clone(),
+            lifecycle,
+        }
+    }
+
+    pub fn with_cluster(&self, cluster: &Cluster) -> Result<Self, TopologySnapshotError> {
+        let replication_factor = u32::try_from(cluster.replication_factor)
+            .map_err(|_| TopologySnapshotError::ReplicationFactorOverflow)?;
+        if cluster
+            .nodes
+            .iter()
+            .any(|(node_id, node)| *node_id != node.id)
+        {
+            return Err(TopologySnapshotError::InvalidNodeMap);
+        }
+        Ok(Self {
+            topology_epoch: cluster.epoch,
+            replication_factor,
+            nodes: cluster.nodes.clone(),
+            lifecycle: self.lifecycle.clone(),
+        })
+    }
+
     pub fn encode(&self) -> Result<Vec<u8>, TopologySnapshotError> {
         let map = self.lifecycle.map();
         let tablet_count =
             u32::try_from(map.tablet_count()).map_err(|_| TopologySnapshotError::TooManyTablets)?;
+        let node_count =
+            u32::try_from(self.nodes.len()).map_err(|_| TopologySnapshotError::TooManyNodes)?;
 
         let mut bytes = Vec::with_capacity(
-            SNAPSHOT_FIXED_BYTES.saturating_add(map.tablet_count().saturating_mul(64)),
+            SNAPSHOT_MIN_BYTES
+                .saturating_add(self.nodes.len().saturating_mul(48))
+                .saturating_add(map.tablet_count().saturating_mul(64)),
         );
         bytes.extend_from_slice(&SNAPSHOT_MAGIC);
         bytes.extend_from_slice(&self.topology_epoch.to_le_bytes());
+        bytes.extend_from_slice(&self.replication_factor.to_le_bytes());
+        bytes.extend_from_slice(&node_count.to_le_bytes());
+
+        for (node_id, node) in &self.nodes {
+            if *node_id != node.id {
+                return Err(TopologySnapshotError::InvalidNodeMap);
+            }
+            let zone = node.zone.as_bytes();
+            let rack = node.rack.as_bytes();
+            let zone_len =
+                u16::try_from(zone.len()).map_err(|_| TopologySnapshotError::StringTooLong)?;
+            let rack_len =
+                u16::try_from(rack.len()).map_err(|_| TopologySnapshotError::StringTooLong)?;
+
+            bytes.extend_from_slice(&node.id.to_le_bytes());
+            bytes.extend_from_slice(&node.weight.to_le_bytes());
+            bytes.push(encode_admin_state(node.state));
+            bytes.extend_from_slice(&zone_len.to_le_bytes());
+            bytes.extend_from_slice(&rack_len.to_le_bytes());
+            bytes.extend_from_slice(zone);
+            bytes.extend_from_slice(rack);
+        }
+
         bytes.extend_from_slice(&map.generation().to_le_bytes());
         bytes.extend_from_slice(&map.next_tablet_id().to_le_bytes());
 
@@ -94,7 +208,7 @@ impl TopologySnapshot {
     }
 
     pub fn decode(bytes: &[u8]) -> Result<Self, TopologySnapshotError> {
-        if bytes.len() < SNAPSHOT_FIXED_BYTES {
+        if bytes.len() < SNAPSHOT_MIN_BYTES {
             return Err(TopologySnapshotError::InvalidLength);
         }
         let payload_len = bytes
@@ -116,6 +230,32 @@ impl TopologySnapshot {
         }
 
         let topology_epoch = cursor.read_u64()?;
+        let replication_factor = cursor.read_u32()?;
+        let node_count = cursor.read_u32()? as usize;
+        let mut nodes = BTreeMap::new();
+
+        for _ in 0..node_count {
+            let id = cursor.read_u64()?;
+            let weight = cursor.read_u32()?;
+            let state = decode_admin_state(cursor.read_u8()?)?;
+            let zone_len = cursor.read_u16()? as usize;
+            let rack_len = cursor.read_u16()? as usize;
+            let zone = String::from_utf8(cursor.read_vec(zone_len)?)
+                .map_err(|_| TopologySnapshotError::InvalidUtf8)?;
+            let rack = String::from_utf8(cursor.read_vec(rack_len)?)
+                .map_err(|_| TopologySnapshotError::InvalidUtf8)?;
+            let node = Node {
+                id,
+                weight,
+                zone,
+                rack,
+                state,
+            };
+            if nodes.insert(id, node).is_some() {
+                return Err(TopologySnapshotError::InvalidNodeMap);
+            }
+        }
+
         let generation = cursor.read_u64()?;
         let next_tablet_id = cursor.read_u64()?;
         let has_last_resize = cursor.read_u8()?;
@@ -156,12 +296,33 @@ impl TopologySnapshot {
         let lifecycle = TabletRangeLifecycle::from_parts(map, last_resize_tick)?;
         Ok(Self {
             topology_epoch,
+            replication_factor,
+            nodes,
             lifecycle,
         })
     }
 
     pub fn stable_checksum(&self) -> Result<u64, TopologySnapshotError> {
         Ok(checksum64(&self.encode()?))
+    }
+}
+
+fn encode_admin_state(state: AdminState) -> u8 {
+    match state {
+        AdminState::Joining => 0,
+        AdminState::Active => 1,
+        AdminState::Draining => 2,
+        AdminState::Removed => 3,
+    }
+}
+
+fn decode_admin_state(value: u8) -> Result<AdminState, TopologySnapshotError> {
+    match value {
+        0 => Ok(AdminState::Joining),
+        1 => Ok(AdminState::Active),
+        2 => Ok(AdminState::Draining),
+        3 => Ok(AdminState::Removed),
+        _ => Err(TopologySnapshotError::InvalidAdminState),
     }
 }
 
@@ -188,6 +349,19 @@ impl<'a> Cursor<'a> {
         chunk
             .try_into()
             .map_err(|_| TopologySnapshotError::InvalidLength)
+    }
+
+    fn read_vec(&mut self, len: usize) -> Result<Vec<u8>, TopologySnapshotError> {
+        let end = self
+            .offset
+            .checked_add(len)
+            .ok_or(TopologySnapshotError::InvalidLength)?;
+        let chunk = self
+            .bytes
+            .get(self.offset..end)
+            .ok_or(TopologySnapshotError::InvalidLength)?;
+        self.offset = end;
+        Ok(chunk.to_vec())
     }
 
     fn read_u8(&mut self) -> Result<u8, TopologySnapshotError> {
@@ -1002,5 +1176,93 @@ mod txn_tests {
                     TopologySnapshotError::InvalidChecksum
                 ))
         ));
+    }
+}
+
+#[cfg(test)]
+mod full_cluster_snapshot_tests {
+    use std::collections::BTreeMap;
+
+    use super::*;
+    use crate::model::{AdminState, Cluster, Node};
+    use crate::range_resize::{RangeTabletMap, TabletRangeLifecycle};
+
+    fn node(id: u64, weight: u32, zone: &str, rack: &str, state: AdminState) -> Node {
+        Node {
+            id,
+            weight,
+            zone: zone.into(),
+            rack: rack.into(),
+            state,
+        }
+    }
+
+    #[test]
+    fn full_cluster_topology_round_trip_preserves_nodes_and_rf() {
+        let map = RangeTabletMap::single(50_000, 10_000, vec![1, 2, 3]).unwrap();
+        let lifecycle = TabletRangeLifecycle::new(map).unwrap();
+        let cluster = Cluster {
+            epoch: 42,
+            replication_factor: 3,
+            nodes: [
+                node(1, 1, "z1", "r1", AdminState::Active),
+                node(2, 2, "z2", "r2", AdminState::Joining),
+                node(3, 4, "z3", "r3", AdminState::Draining),
+                node(4, 8, "z4", "r4", AdminState::Removed),
+            ]
+            .into_iter()
+            .map(|node| (node.id, node))
+            .collect::<BTreeMap<_, _>>(),
+            tablets: Vec::new(),
+        };
+
+        let snapshot = TopologySnapshot::from_runtime(&cluster, &lifecycle).unwrap();
+        let decoded = TopologySnapshot::decode(&snapshot.encode().unwrap()).unwrap();
+        let recovered_cluster = decoded.cluster();
+
+        assert_eq!(decoded, snapshot);
+        assert_eq!(recovered_cluster.epoch, cluster.epoch);
+        assert_eq!(
+            recovered_cluster.replication_factor,
+            cluster.replication_factor
+        );
+        assert_eq!(recovered_cluster.nodes, cluster.nodes);
+        assert_eq!(
+            recovered_cluster.tablets.len(),
+            lifecycle.map().tablet_count()
+        );
+    }
+
+    #[test]
+    fn replacing_cluster_keeps_exact_range_lifecycle() {
+        let map = RangeTabletMap::single(50_000, 10_000, vec![1, 2]).unwrap();
+        let lifecycle = TabletRangeLifecycle::new(map).unwrap();
+        let old = Cluster {
+            epoch: 7,
+            replication_factor: 2,
+            nodes: [
+                node(1, 1, "z1", "r1", AdminState::Active),
+                node(2, 1, "z2", "r1", AdminState::Active),
+            ]
+            .into_iter()
+            .map(|node| (node.id, node))
+            .collect(),
+            tablets: Vec::new(),
+        };
+        let mut new = old.clone();
+        new.epoch = 8;
+        new.nodes
+            .insert(3, node(3, 8, "z3", "r1", AdminState::Active));
+
+        let snapshot = TopologySnapshot::from_runtime(&old, &lifecycle).unwrap();
+        let target = snapshot.with_cluster(&new).unwrap();
+
+        assert_eq!(target.topology_epoch(), 8);
+        assert_eq!(target.nodes(), &new.nodes);
+        assert_eq!(target.lifecycle(), snapshot.lifecycle());
+        assert_eq!(
+            target.lifecycle().map().generation(),
+            snapshot.lifecycle().map().generation()
+        );
     }
 }
