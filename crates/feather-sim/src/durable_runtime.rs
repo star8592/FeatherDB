@@ -8,7 +8,7 @@ use crate::runtime_coordinator::{
 };
 use crate::topology_snapshot::{
     DurableTopologyTxnWriter, TopologyRecovery, TopologySnapshot, TopologyTxnError,
-    TopologyTxnState, read_prepared_topology, recover_topology,
+    TopologyTxnState, read_prepared_topology, recover_topology, validate_topology_txn_start,
 };
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -55,13 +55,16 @@ pub struct DurableResizeTransaction {
 }
 
 impl DurableResizeTransaction {
-    pub fn new(
+    pub fn new<S: DurableStore>(
         txn_id: u64,
+        begin_tick: u64,
+        store: &mut S,
         runtime: &mut TabletRuntimeCoordinator,
         plan: LifecycleResizePlan,
         commit_tick: u64,
     ) -> Result<Self, DurableResizeError> {
         let current = runtime.capture_topology_snapshot()?;
+        let _ = validate_topology_txn_start(begin_tick, &current, store)?;
         let topology_epoch = current.topology_epoch();
         let mut target_lifecycle = current.lifecycle().clone();
         let preview = target_lifecycle
@@ -372,7 +375,8 @@ mod tests {
         let mut disk = SimDisk::default();
         persist_current(&mut disk, &current);
 
-        let mut txn = DurableResizeTransaction::new(100, &mut runtime, plan, 11).unwrap();
+        let mut txn =
+            DurableResizeTransaction::new(100, 0, &mut disk, &mut runtime, plan, 11).unwrap();
 
         assert_eq!(
             txn.tick(1, &mut runtime, &mut disk).unwrap(),
@@ -406,7 +410,8 @@ mod tests {
         let mut disk = SimDisk::default();
         persist_current(&mut disk, &current);
 
-        let mut txn = DurableResizeTransaction::new(101, &mut runtime, plan, 11).unwrap();
+        let mut txn =
+            DurableResizeTransaction::new(101, 0, &mut disk, &mut runtime, plan, 11).unwrap();
         assert_eq!(
             txn.tick(1, &mut runtime, &mut disk).unwrap(),
             DurableResizeProgress::Prepared
@@ -445,7 +450,8 @@ mod tests {
         persist_current(&mut disk, &current);
         disk.set_full(true);
 
-        let mut txn = DurableResizeTransaction::new(102, &mut runtime, plan, 11).unwrap();
+        let mut txn =
+            DurableResizeTransaction::new(102, 0, &mut disk, &mut runtime, plan, 11).unwrap();
         assert_eq!(
             txn.tick(1, &mut runtime, &mut disk).unwrap(),
             DurableResizeProgress::StorageFailed(DiskError::Full)
@@ -474,7 +480,8 @@ mod tests {
         let mut disk = SimDisk::default();
         persist_current(&mut disk, &current);
 
-        let mut txn = DurableResizeTransaction::new(103, &mut runtime, plan, 11).unwrap();
+        let mut txn =
+            DurableResizeTransaction::new(103, 0, &mut disk, &mut runtime, plan, 11).unwrap();
         assert_eq!(
             txn.tick(1, &mut runtime, &mut disk).unwrap(),
             DurableResizeProgress::Prepared
@@ -514,7 +521,8 @@ mod tests {
         let mut disk = SimDisk::default();
         persist_current(&mut disk, &current);
 
-        let mut txn = DurableResizeTransaction::new(105, &mut runtime, plan, 11).unwrap();
+        let mut txn =
+            DurableResizeTransaction::new(105, 0, &mut disk, &mut runtime, plan, 11).unwrap();
         assert_eq!(
             txn.tick(1, &mut runtime, &mut disk).unwrap(),
             DurableResizeProgress::Prepared
@@ -571,11 +579,17 @@ mod tests {
             let current = runtime.capture_topology_snapshot().unwrap();
             let mut disk = SimDisk::default();
             persist_current(&mut disk, &current);
-            disk.set_delay(2);
 
-            let mut txn =
-                DurableResizeTransaction::new(1_000 + case_index as u64, &mut runtime, plan, 11)
-                    .unwrap();
+            let mut txn = DurableResizeTransaction::new(
+                1_000 + case_index as u64,
+                0,
+                &mut disk,
+                &mut runtime,
+                plan,
+                11,
+            )
+            .unwrap();
+            disk.set_delay(2);
 
             match edge {
                 CrashEdge::PreparePutPending => {
@@ -658,6 +672,31 @@ mod tests {
     }
 
     #[test]
+    fn active_prepared_resize_blocks_second_transaction_from_overwriting_slot() {
+        let mut runtime = runtime();
+        let first_plan = plan(&mut runtime);
+        let current = runtime.capture_topology_snapshot().unwrap();
+        let mut disk = SimDisk::default();
+        persist_current(&mut disk, &current);
+
+        let mut first =
+            DurableResizeTransaction::new(300, 0, &mut disk, &mut runtime, first_plan.clone(), 11)
+                .unwrap();
+        assert_eq!(
+            first.tick(1, &mut runtime, &mut disk).unwrap(),
+            DurableResizeProgress::Prepared
+        );
+
+        assert!(matches!(
+            DurableResizeTransaction::new(301, 2, &mut disk, &mut runtime, first_plan, 11),
+            Err(DurableResizeError::Topology(
+                TopologyTxnError::ActivePrepared { txn_id: 300 }
+            ))
+        ));
+        assert_eq!(runtime.lifecycle().map().generation(), 0);
+    }
+
+    #[test]
     fn recovered_runtime_reconstructs_post_resize_migration_work() {
         let mut runtime = runtime();
         let plan = plan(&mut runtime);
@@ -665,7 +704,8 @@ mod tests {
         let mut disk = SimDisk::default();
         persist_current(&mut disk, &current);
 
-        let mut txn = DurableResizeTransaction::new(104, &mut runtime, plan, 11).unwrap();
+        let mut txn =
+            DurableResizeTransaction::new(104, 0, &mut disk, &mut runtime, plan, 11).unwrap();
         txn.tick(1, &mut runtime, &mut disk).unwrap();
         disk.crash();
 
@@ -713,12 +753,15 @@ pub struct DurableTopologyChangeTransaction {
 }
 
 impl DurableTopologyChangeTransaction {
-    pub fn new(
+    pub fn new<S: DurableStore>(
         txn_id: u64,
+        begin_tick: u64,
+        store: &mut S,
         runtime: &mut TabletRuntimeCoordinator,
         proposed_cluster: Cluster,
     ) -> Result<Self, DurableTopologyChangeError> {
         let current = runtime.capture_topology_snapshot()?;
+        let _ = validate_topology_txn_start(begin_tick, &current, store)?;
         let target = current
             .with_cluster(&proposed_cluster)
             .map_err(TopologyTxnError::from)?;
@@ -895,7 +938,8 @@ mod topology_change_tests {
         persist_current(&mut disk, &current);
 
         let mut txn =
-            DurableTopologyChangeTransaction::new(200, &mut runtime, next_cluster()).unwrap();
+            DurableTopologyChangeTransaction::new(200, 0, &mut disk, &mut runtime, next_cluster())
+                .unwrap();
 
         assert_eq!(
             txn.tick(1, &mut runtime, &mut disk).unwrap(),
@@ -939,7 +983,8 @@ mod topology_change_tests {
         persist_current(&mut disk, &current);
 
         let mut txn =
-            DurableTopologyChangeTransaction::new(201, &mut runtime, next_cluster()).unwrap();
+            DurableTopologyChangeTransaction::new(201, 0, &mut disk, &mut runtime, next_cluster())
+                .unwrap();
         assert_eq!(
             txn.tick(1, &mut runtime, &mut disk).unwrap(),
             DurableResizeProgress::Prepared
@@ -983,10 +1028,12 @@ mod topology_change_tests {
     fn same_or_older_epoch_topology_change_is_rejected_before_prepare() {
         let mut runtime = runtime();
         let before = runtime.capture_topology_snapshot().unwrap();
+        let mut disk = SimDisk::default();
+        persist_current(&mut disk, &before);
 
         let same = initial_cluster();
         assert!(matches!(
-            DurableTopologyChangeTransaction::new(202, &mut runtime, same),
+            DurableTopologyChangeTransaction::new(202, 0, &mut disk, &mut runtime, same),
             Err(DurableTopologyChangeError::Topology(
                 TopologyTxnError::InvalidTransition
             ))
@@ -995,7 +1042,7 @@ mod topology_change_tests {
         let mut older = initial_cluster();
         older.epoch = 6;
         assert!(matches!(
-            DurableTopologyChangeTransaction::new(203, &mut runtime, older),
+            DurableTopologyChangeTransaction::new(203, 0, &mut disk, &mut runtime, older),
             Err(DurableTopologyChangeError::Topology(
                 TopologyTxnError::InvalidTransition
             ))
@@ -1047,7 +1094,9 @@ mod topology_change_tests {
         let mut proposed = initial_cluster();
         proposed.epoch = 8;
         proposed.nodes.get_mut(&3).unwrap().state = AdminState::Removed;
-        let mut txn = DurableTopologyChangeTransaction::new(205, &mut runtime, proposed).unwrap();
+        let mut txn =
+            DurableTopologyChangeTransaction::new(205, 80, &mut disk, &mut runtime, proposed)
+                .unwrap();
 
         assert_eq!(
             txn.tick(81, &mut runtime, &mut disk).unwrap(),
@@ -1068,6 +1117,55 @@ mod topology_change_tests {
     }
 
     #[test]
+    fn runtime_ahead_of_durable_current_blocks_new_topology_transaction() {
+        let mut runtime = runtime();
+        let durable = runtime.capture_topology_snapshot().unwrap();
+        let mut disk = SimDisk::default();
+        persist_current(&mut disk, &durable);
+
+        runtime.reconcile_topology(next_cluster()).unwrap();
+        let mut epoch9 = next_cluster();
+        epoch9.epoch = 9;
+        epoch9.nodes.insert(5, node(5, 32, "e", AdminState::Active));
+
+        assert!(matches!(
+            DurableTopologyChangeTransaction::new(302, 1, &mut disk, &mut runtime, epoch9),
+            Err(DurableTopologyChangeError::Topology(
+                TopologyTxnError::CurrentMismatch
+            ))
+        ));
+    }
+
+    #[test]
+    fn stale_committed_prepared_allows_next_serialized_transaction() {
+        let mut runtime = runtime();
+        let current = runtime.capture_topology_snapshot().unwrap();
+        let mut disk = SimDisk::default();
+        persist_current(&mut disk, &current);
+
+        let mut first =
+            DurableTopologyChangeTransaction::new(303, 0, &mut disk, &mut runtime, next_cluster())
+                .unwrap();
+        first.tick(1, &mut runtime, &mut disk).unwrap();
+        assert_eq!(
+            first.tick(2, &mut runtime, &mut disk).unwrap(),
+            DurableResizeProgress::Complete
+        );
+
+        let mut epoch9 = next_cluster();
+        epoch9.epoch = 9;
+        epoch9.nodes.insert(5, node(5, 32, "e", AdminState::Active));
+
+        let mut second =
+            DurableTopologyChangeTransaction::new(304, 3, &mut disk, &mut runtime, epoch9).unwrap();
+        assert_eq!(
+            second.tick(4, &mut runtime, &mut disk).unwrap(),
+            DurableResizeProgress::Prepared
+        );
+        assert_eq!(second.writer_state(), TopologyTxnState::Prepared);
+    }
+
+    #[test]
     fn disk_full_before_topology_prepare_cannot_advance_epoch() {
         let mut runtime = runtime();
         let current = runtime.capture_topology_snapshot().unwrap();
@@ -1076,7 +1174,8 @@ mod topology_change_tests {
         disk.set_full(true);
 
         let mut txn =
-            DurableTopologyChangeTransaction::new(204, &mut runtime, next_cluster()).unwrap();
+            DurableTopologyChangeTransaction::new(204, 0, &mut disk, &mut runtime, next_cluster())
+                .unwrap();
         assert_eq!(
             txn.tick(1, &mut runtime, &mut disk).unwrap(),
             DurableResizeProgress::StorageFailed(DiskError::Full)

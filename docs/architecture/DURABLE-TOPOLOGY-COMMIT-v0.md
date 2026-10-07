@@ -191,3 +191,47 @@ SWIM membership state is now covered by an executable integration invariant:
 A test crashes a node until all live SWIM observers classify it Dead. RuntimeCoordinator remains on the old TopologyEpoch and the node remains Active in durable cluster metadata. Only an explicit durable topology transaction advances the epoch, changes AdminState to Removed, and triggers ownership Repair.
 
 This keeps failure evidence and ownership authority deliberately separated.
+
+
+## Single-slot transaction serialization guard
+
+The fixed topology/prepared slot is now protected before every durable resize or topology transaction begins.
+
+A new transaction may start only when:
+
+    durable CURRENT == runtime current full snapshot
+
+and either:
+
+    PREPARED is absent
+
+or:
+
+    PREPARED.target == CURRENT
+
+The second case is a safely committed but not-yet-garbage-collected prepared record.
+
+If CURRENT matches PREPARED.from, PREPARED is still active replay material and the constructor returns ActivePrepared(txn_id). It cannot be overwritten.
+
+If runtime and durable CURRENT differ, transaction creation returns CurrentMismatch. This prevents an in-memory coordinator that is already ahead of disk from starting another authority transition.
+
+An unrelated CURRENT/PREPARED pair remains RecoveryConflict.
+
+Executable tests verify all three cases: active overwrite rejection, runtime-vs-durable mismatch rejection, and safe overwrite of stale committed PREPARED.
+
+## PREPARED garbage collection
+
+PreparedTopologyGc deletes only a PREPARED record whose target is already the authoritative CURRENT snapshot.
+
+The cleanup sequence is:
+
+    validate CURRENT == PREPARED.target
+      -> Delete topology/prepared
+      -> Sync
+      -> Complete
+
+An active PREPARED is never eligible for GC.
+
+Crash safety is explicit: if Delete has completed in volatile state but Sync has not, crash restores the old durable PREPARED. Recovery still observes CURRENT(target) and remains safe; GC can simply run again.
+
+Therefore cleanup is correctness-neutral and idempotent.

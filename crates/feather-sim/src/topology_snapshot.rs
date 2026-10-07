@@ -631,6 +631,9 @@ pub enum TopologyTxnError {
     Snapshot(TopologySnapshotError),
     InvalidRecord,
     InvalidTransition,
+    MissingCurrent,
+    CurrentMismatch,
+    ActivePrepared { txn_id: u64 },
     PendingRead,
     RecoveryConflict,
 }
@@ -901,6 +904,47 @@ impl DurableTopologyTxnWriter {
             crate::disk::DiskPoll::Failed(error) => self.fail(error, true),
         }
     }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum TopologyTxnStartState {
+    Clean,
+    StaleCommitted { txn_id: u64 },
+}
+
+pub fn validate_topology_txn_start<S: crate::disk::DurableStore>(
+    now_tick: u64,
+    expected_current: &TopologySnapshot,
+    store: &mut S,
+) -> Result<TopologyTxnStartState, TopologyTxnError> {
+    let current = read_current_topology(now_tick, u64::MAX - 10, store)?
+        .ok_or(TopologyTxnError::MissingCurrent)?;
+    if &current != expected_current {
+        return Err(TopologyTxnError::CurrentMismatch);
+    }
+
+    let prepared = read_prepared_topology(now_tick, u64::MAX - 9, store)?;
+    let Some(prepared) = prepared else {
+        return Ok(TopologyTxnStartState::Clean);
+    };
+
+    if current == prepared.target {
+        return Ok(TopologyTxnStartState::StaleCommitted {
+            txn_id: prepared.txn_id,
+        });
+    }
+
+    let current_identity = (
+        current.topology_epoch(),
+        current.lifecycle().map().generation(),
+    );
+    if current_identity == (prepared.from_topology_epoch, prepared.from_generation) {
+        return Err(TopologyTxnError::ActivePrepared {
+            txn_id: prepared.txn_id,
+        });
+    }
+
+    Err(TopologyTxnError::RecoveryConflict)
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -1264,5 +1308,316 @@ mod full_cluster_snapshot_tests {
             target.lifecycle().map().generation(),
             snapshot.lifecycle().map().generation()
         );
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum PreparedGcState {
+    NotNeeded,
+    DeleteIdle,
+    DeletePending,
+    SyncPending,
+    Complete,
+    Failed(crate::disk::DiskError),
+}
+
+#[derive(Clone, Debug)]
+pub struct PreparedTopologyGc {
+    state: PreparedGcState,
+    next_op_id: crate::disk::DiskOpId,
+    active_op: Option<crate::disk::DiskOpId>,
+}
+
+impl PreparedTopologyGc {
+    pub fn begin<S: crate::disk::DurableStore>(
+        now_tick: u64,
+        store: &mut S,
+    ) -> Result<Self, TopologyTxnError> {
+        let current = read_current_topology(now_tick, u64::MAX - 20, store)?;
+        let prepared = read_prepared_topology(now_tick, u64::MAX - 19, store)?;
+
+        let state = match (current, prepared) {
+            (_, None) => PreparedGcState::NotNeeded,
+            (Some(current), Some(prepared)) if current == prepared.target => {
+                PreparedGcState::DeleteIdle
+            }
+            (Some(current), Some(prepared)) => {
+                let current_identity = (
+                    current.topology_epoch(),
+                    current.lifecycle().map().generation(),
+                );
+                if current_identity == (prepared.from_topology_epoch, prepared.from_generation) {
+                    return Err(TopologyTxnError::ActivePrepared {
+                        txn_id: prepared.txn_id,
+                    });
+                }
+                return Err(TopologyTxnError::RecoveryConflict);
+            }
+            (None, Some(prepared)) => {
+                return Err(TopologyTxnError::ActivePrepared {
+                    txn_id: prepared.txn_id,
+                });
+            }
+        };
+
+        Ok(Self {
+            state,
+            next_op_id: u64::MAX - 18,
+            active_op: None,
+        })
+    }
+
+    pub fn state(&self) -> PreparedGcState {
+        self.state
+    }
+
+    pub fn is_complete(&self) -> bool {
+        matches!(
+            self.state,
+            PreparedGcState::NotNeeded | PreparedGcState::Complete
+        )
+    }
+
+    pub fn retry(&mut self) {
+        if matches!(self.state, PreparedGcState::Failed(_)) {
+            self.active_op = None;
+            self.state = PreparedGcState::DeleteIdle;
+        }
+    }
+
+    pub fn tick<S: crate::disk::DurableStore>(&mut self, now_tick: u64, store: &mut S) {
+        match self.state {
+            PreparedGcState::NotNeeded | PreparedGcState::Complete => {}
+            PreparedGcState::DeleteIdle => self.submit_delete(now_tick, store),
+            PreparedGcState::DeletePending => self.poll_delete(now_tick, store),
+            PreparedGcState::SyncPending => self.poll_sync(now_tick, store),
+            PreparedGcState::Failed(_) => {}
+        }
+    }
+
+    fn alloc_op_id(&mut self) -> crate::disk::DiskOpId {
+        let op_id = self.next_op_id;
+        self.next_op_id = self.next_op_id.saturating_sub(1);
+        op_id
+    }
+
+    fn submit_delete<S: crate::disk::DurableStore>(&mut self, now_tick: u64, store: &mut S) {
+        let op_id = self.alloc_op_id();
+        match store.submit(
+            now_tick,
+            crate::disk::DiskRequest::Delete {
+                op_id,
+                key: PREPARED_TOPOLOGY_KEY.to_vec(),
+            },
+        ) {
+            crate::disk::DiskSubmit::Completed(_) => self.submit_sync(now_tick, store),
+            crate::disk::DiskSubmit::Pending => {
+                self.active_op = Some(op_id);
+                self.state = PreparedGcState::DeletePending;
+            }
+            crate::disk::DiskSubmit::Failed(error) => {
+                self.active_op = None;
+                self.state = PreparedGcState::Failed(error);
+            }
+        }
+    }
+
+    fn poll_delete<S: crate::disk::DurableStore>(&mut self, now_tick: u64, store: &mut S) {
+        let Some(op_id) = self.active_op else {
+            self.state = PreparedGcState::Failed(crate::disk::DiskError::Cancelled);
+            return;
+        };
+        match store.poll(now_tick, op_id) {
+            crate::disk::DiskPoll::Pending => {}
+            crate::disk::DiskPoll::Completed(_) => {
+                self.active_op = None;
+                self.submit_sync(now_tick, store);
+            }
+            crate::disk::DiskPoll::Failed(error) => {
+                self.active_op = None;
+                self.state = PreparedGcState::Failed(error);
+            }
+        }
+    }
+
+    fn submit_sync<S: crate::disk::DurableStore>(&mut self, now_tick: u64, store: &mut S) {
+        let op_id = self.alloc_op_id();
+        match store.submit(now_tick, crate::disk::DiskRequest::Sync { op_id }) {
+            crate::disk::DiskSubmit::Completed(_) => {
+                self.active_op = None;
+                self.state = PreparedGcState::Complete;
+            }
+            crate::disk::DiskSubmit::Pending => {
+                self.active_op = Some(op_id);
+                self.state = PreparedGcState::SyncPending;
+            }
+            crate::disk::DiskSubmit::Failed(error) => {
+                self.active_op = None;
+                self.state = PreparedGcState::Failed(error);
+            }
+        }
+    }
+
+    fn poll_sync<S: crate::disk::DurableStore>(&mut self, now_tick: u64, store: &mut S) {
+        let Some(op_id) = self.active_op else {
+            self.state = PreparedGcState::Failed(crate::disk::DiskError::Cancelled);
+            return;
+        };
+        match store.poll(now_tick, op_id) {
+            crate::disk::DiskPoll::Pending => {}
+            crate::disk::DiskPoll::Completed(_) => {
+                self.active_op = None;
+                self.state = PreparedGcState::Complete;
+            }
+            crate::disk::DiskPoll::Failed(error) => {
+                self.active_op = None;
+                self.state = PreparedGcState::Failed(error);
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod prepared_gc_tests {
+    use super::*;
+    use crate::disk::{DiskRequest, DiskSubmit, DurableStore, SimDisk};
+    use crate::range_resize::{LifecycleResizeDecision, RangeTabletMap};
+    use crate::resize::TabletResizePolicy;
+
+    fn policy() -> TabletResizePolicy {
+        TabletResizePolicy {
+            target_tablet_bytes: 100,
+            split_above_num: 2,
+            split_above_den: 1,
+            merge_below_num: 1,
+            merge_below_den: 2,
+            cooldown_ticks: 0,
+            min_tablets: 1,
+            max_tablets: 64,
+            metadata_bytes_per_tablet: 24,
+            metadata_budget_bytes: 64 * 24,
+        }
+    }
+
+    fn current_and_target() -> (TopologySnapshot, TopologySnapshot) {
+        let map = RangeTabletMap::single(100, 1_000, vec![1, 2, 3]).unwrap();
+        let current_lifecycle = TabletRangeLifecycle::new(map).unwrap();
+        let mut target_lifecycle = current_lifecycle.clone();
+        let plan = match target_lifecycle.evaluate(1_000, 10, 7, &policy()).unwrap() {
+            LifecycleResizeDecision::Planned(plan) => plan,
+            other => panic!("expected plan, got {other:?}"),
+        };
+        target_lifecycle.commit(&plan, 7, 11).unwrap();
+
+        (
+            TopologySnapshot::from_lifecycle(7, &current_lifecycle),
+            TopologySnapshot::from_lifecycle(7, &target_lifecycle),
+        )
+    }
+
+    fn persist_current(disk: &mut SimDisk, snapshot: &TopologySnapshot) {
+        assert!(matches!(
+            disk.submit(
+                0,
+                DiskRequest::Put {
+                    op_id: 80_000,
+                    key: CURRENT_TOPOLOGY_KEY.to_vec(),
+                    value: snapshot.encode().unwrap(),
+                },
+            ),
+            DiskSubmit::Completed(_)
+        ));
+        assert!(matches!(
+            disk.submit(0, DiskRequest::Sync { op_id: 80_001 }),
+            DiskSubmit::Completed(_)
+        ));
+    }
+
+    fn complete_txn(
+        disk: &mut SimDisk,
+        txn_id: u64,
+        current: &TopologySnapshot,
+        target: &TopologySnapshot,
+    ) {
+        let mut writer = DurableTopologyTxnWriter::new(txn_id, current, target.clone()).unwrap();
+        writer.tick(1, disk);
+        assert_eq!(writer.state(), TopologyTxnState::Prepared);
+        assert!(writer.mark_applied());
+        writer.tick(2, disk);
+        assert_eq!(writer.state(), TopologyTxnState::Complete);
+    }
+
+    #[test]
+    fn gc_deletes_only_stale_committed_prepared_record() {
+        let (current, target) = current_and_target();
+        let mut disk = SimDisk::default();
+        persist_current(&mut disk, &current);
+        complete_txn(&mut disk, 400, &current, &target);
+
+        assert!(
+            read_prepared_topology(3, 90_000, &mut disk)
+                .unwrap()
+                .is_some()
+        );
+
+        let mut gc = PreparedTopologyGc::begin(4, &mut disk).unwrap();
+        assert_eq!(gc.state(), PreparedGcState::DeleteIdle);
+        gc.tick(4, &mut disk);
+        assert_eq!(gc.state(), PreparedGcState::Complete);
+
+        assert_eq!(read_prepared_topology(5, 90_001, &mut disk).unwrap(), None);
+        assert_eq!(
+            recover_topology(5, &mut disk).unwrap(),
+            TopologyRecovery::Current(target)
+        );
+    }
+
+    #[test]
+    fn gc_refuses_active_prepared_transaction() {
+        let (current, target) = current_and_target();
+        let mut disk = SimDisk::default();
+        persist_current(&mut disk, &current);
+
+        let mut writer = DurableTopologyTxnWriter::new(401, &current, target).unwrap();
+        writer.tick(1, &mut disk);
+        assert_eq!(writer.state(), TopologyTxnState::Prepared);
+
+        assert!(matches!(
+            PreparedTopologyGc::begin(2, &mut disk),
+            Err(TopologyTxnError::ActivePrepared { txn_id: 401 })
+        ));
+    }
+
+    #[test]
+    fn crash_after_delete_before_gc_sync_restores_prepared_safely() {
+        let (current, target) = current_and_target();
+        let mut disk = SimDisk::default();
+        persist_current(&mut disk, &current);
+        complete_txn(&mut disk, 402, &current, &target);
+
+        let mut gc = PreparedTopologyGc::begin(3, &mut disk).unwrap();
+        disk.set_delay(2);
+        gc.tick(10, &mut disk);
+        assert_eq!(gc.state(), PreparedGcState::DeletePending);
+        gc.tick(12, &mut disk);
+        assert_eq!(gc.state(), PreparedGcState::SyncPending);
+
+        disk.crash();
+        disk.set_delay(0);
+
+        assert!(
+            read_prepared_topology(13, 90_002, &mut disk)
+                .unwrap()
+                .is_some()
+        );
+        assert_eq!(
+            recover_topology(13, &mut disk).unwrap(),
+            TopologyRecovery::Current(target)
+        );
+
+        let mut retry_gc = PreparedTopologyGc::begin(14, &mut disk).unwrap();
+        retry_gc.tick(14, &mut disk);
+        assert!(retry_gc.is_complete());
+        assert_eq!(read_prepared_topology(15, 90_003, &mut disk).unwrap(), None);
     }
 }

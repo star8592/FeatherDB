@@ -105,7 +105,8 @@ pub use transport::{
 };
 
 pub use topology_snapshot::{
-    DurableTopologyTxnWriter, PreparedTopologyTxn, TopologyRecovery, TopologySnapshot,
-    TopologySnapshotError, TopologyTxnError, TopologyTxnState, read_current_topology,
-    read_prepared_topology, recover_topology,
+    DurableTopologyTxnWriter, PreparedGcState, PreparedTopologyGc, PreparedTopologyTxn,
+    TopologyRecovery, TopologySnapshot, TopologySnapshotError, TopologyTxnError,
+    TopologyTxnStartState, TopologyTxnState, read_current_topology, read_prepared_topology,
+    recover_topology, validate_topology_txn_start,
 };
