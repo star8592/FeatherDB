@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/feather-storage-api", "crates/feather-sim"]
+members = ["crates/feather-storage-api", "crates/feather-storage-fjall", "crates/feather-sim"]
 resolver = "3"
 
 [workspace.package]

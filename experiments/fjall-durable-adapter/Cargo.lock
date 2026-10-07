@@ -110,12 +110,28 @@ name = "feather-fjall-durable-adapter"
 version = "0.0.0"
 dependencies = [
  "feather-sim",
- "fjall",
+ "feather-storage-api",
+ "feather-storage-fjall",
 ]
 
 [[package]]
 name = "feather-sim"
 version = "0.0.1"
+dependencies = [
+ "feather-storage-api",
+]
+
+[[package]]
+name = "feather-storage-api"
+version = "0.0.1"
+
+[[package]]
+name = "feather-storage-fjall"
+version = "0.0.1"
+dependencies = [
+ "feather-storage-api",
+ "fjall",
+]
 
 [[package]]
 name = "fjall"

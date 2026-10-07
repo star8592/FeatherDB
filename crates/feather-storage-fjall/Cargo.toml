@@ -1,0 +1,13 @@
+[package]
+name = "feather-storage-fjall"
+version = "0.0.1"
+edition.workspace = true
+rust-version.workspace = true
+publish = false
+
+[dependencies]
+feather-storage-api = { path = "../feather-storage-api" }
+fjall = "3.1.12"
+
+[dev-dependencies]
+tempfile = "3.23.0"

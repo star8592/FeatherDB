@@ -8,5 +8,6 @@ rust-version = "1.99"
 publish = false
 
 [dependencies]
+feather-storage-api = { path = "../../crates/feather-storage-api" }
+feather-storage-fjall = { path = "../../crates/feather-storage-fjall" }
 feather-sim = { path = "../../crates/feather-sim" }
-fjall = "3.1.12"

@@ -4,8 +4,8 @@ use std::path::PathBuf;
 use std::thread;
 use std::time::Duration;
 
-use feather_fjall_durable_adapter::FjallDurableStore;
-use feather_sim::{DiskCompletion, DiskRequest, DiskSubmit, DurableStore};
+use feather_storage_api::{DiskCompletion, DiskRequest, DiskSubmit, DurableStore};
+use feather_storage_fjall::FjallDurableStore;
 
 fn main() -> Result<(), Box<dyn Error>> {
     let mut args = std::env::args().skip(1);
