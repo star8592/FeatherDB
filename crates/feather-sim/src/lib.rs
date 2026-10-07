@@ -15,6 +15,7 @@ pub mod planner;
 pub mod range_resize;
 pub mod resize;
 pub mod reverse_index;
+pub mod runtime_coordinator;
 pub mod split_boundary;
 pub mod transport;
 
@@ -47,6 +48,11 @@ pub use migration::{
 pub use model::{AdminState, Cluster, Node, NodeId, Placement, Tablet, TabletId};
 pub use placement::{FailureDomainPolicy, PlacementStrategy};
 pub use planner::{PlannerResult, plan_rebalance};
+
+pub use runtime_coordinator::{
+    CoordinatedResizeCommitOutcome, CoordinatedResizeDecision, TabletRuntimeCoordinator,
+    TabletRuntimeError,
+};
 
 pub use reverse_index::{
     AdaptiveTabletIndex, AdaptiveTabletIndexKind, ContiguousTabletIndex, OpenAddressTabletIndex,

@@ -392,3 +392,28 @@ Selection rules:
       -> choose the lowest-score eligible data-aware boundary
 
 This is intentionally conservative. Split-boundary telemetry is advisory evidence, not topology authority.
+
+
+## Resize and ownership-migration coordination
+
+TabletRuntimeCoordinator now composes TabletRangeLifecycle with CompactWindowScheduler.
+
+The v0 rule is deliberately conservative:
+
+    unresolved ownership migration
+      -> resize evaluation/commit is blocked
+
+Before resize, committed compact actual replica sets are synchronized back into the physical range map, so child tablets inherit current ownership rather than stale pre-migration ownership.
+
+After RangeGeneration commits, the coordinator rebuilds CompactTabletCatalog and CompactWindowScheduler from the new physical map, recomputes desired placement using the new stable TabletIds, and allows any required ownership movement to converge before another resize.
+
+Control-plane retry semantics remain independent of the barrier: retry of an already-applied plan returns AlreadyApplied; older generations return StaleGeneration; topology advancement returns StaleTopology.
+
+ScyllaDB's mature tablet architecture can migrate split halves independently, but its current vnode-to-tablet migration procedure also forbids concurrent topology changes and repair. FeatherDB therefore keeps the simpler serialized rule until deterministic parent/child transfer-lineage tests justify relaxing it.
+
+See:
+
+- docs/architecture/RESIZE-MIGRATION-FENCING-v0.md
+- docs/experiments/2026-10-07-resize-migration-fencing.md
+- https://docs.scylladb.com/manual/stable/architecture/tablets.html
+- https://docs.scylladb.com/manual/branch-2026.3/operating-scylla/procedures/config-change/migrate-vnodes-to-tablets.html

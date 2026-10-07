@@ -112,12 +112,12 @@ See docs/experiments/2026-10-07-range-resize.md.
 Still open:
 
 - multi-objective split-boundary policy is implemented; production default remains unfrozen pending broader workload evidence;
-- integration with migration while resize and placement change concurrently;
+- resize/migration integration now has a conservative generation barrier through TabletRuntimeCoordinator; true same-tablet concurrent split+transfer remains intentionally unsupported pending lineage evidence;
 - deterministic crash injection at every resize transition.
 
 ### Tablet lifecycle track
 
-Logical split/merge control implements hysteresis, cooldown, metadata-budget limits, generation/topology fencing, and crash-replay idempotency. Physical hash-range split/merge execution is now implemented in the simulator through TabletRangeLifecycle, with coordinated count/range commits and replay fencing. Boundary objective selection remains a policy/research question rather than a correctness gap. See docs/architecture/TABLET-LIFECYCLE-v0.md.
+Logical split/merge control implements hysteresis, cooldown, metadata-budget limits, generation/topology fencing, and crash-replay idempotency. Physical hash-range split/merge execution is implemented through TabletRangeLifecycle. TabletRuntimeCoordinator now serializes RangeGeneration commits against unresolved ownership migration, synchronizes committed actual replicas before resize, rebuilds compact catalog/placement after commit, preserves idempotent AlreadyApplied/StaleGeneration semantics, and retains runtime NodeHealth. True split-while-transfer concurrency remains intentionally blocked. See docs/architecture/TABLET-LIFECYCLE-v0.md and docs/architecture/RESIZE-MIGRATION-FENCING-v0.md.
 
 ### Million-tablet compact metadata status
 
@@ -309,12 +309,12 @@ Fault tests:
 - Phase 1.3: partial; strong-node join and failure-domain-pressure scenarios implemented.
 - RF=2 single-node removal movement now matches a failure-domain-aware constrained lower bound exactly.
 - Tablet resize controller: logical count control implemented with hysteresis, cooldown, metadata budget, epoch/generation fencing, and replay idempotency.
-- Tests: 135 passing.
+- Tests: 143 passing.
 - First experiment: `docs/experiments/2026-10-06-placement-baseline.md`.
 - ADR-0001: still Proposed.
 - ADR-0002: still Proposed.
 
-Next priority: tablet-resize/migration generation fencing, actual Membership/SWIM state machine on the shared bus, deterministic disk adapter, then production-substrate benchmarks.
+Next priority: actual Membership/SWIM state machine on the shared bus, deterministic disk adapter, 100-node topology churn campaign, then production-substrate benchmarks.
 
 ### Placement planner hypothesis
 

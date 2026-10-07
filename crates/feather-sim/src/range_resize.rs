@@ -127,6 +127,20 @@ impl RangeTabletMap {
             .filter(|tablet| tablet.start <= token && token < tablet.end)
     }
 
+    pub(crate) fn replace_replicas_by_slot(
+        &mut self,
+        slot: usize,
+        replicas: &[NodeId],
+    ) -> Result<(), RangeResizeError> {
+        let Some(tablet) = self.tablets.get_mut(slot) else {
+            return Err(RangeResizeError::InvalidPlan);
+        };
+        let mut replicas = replicas.to_vec();
+        canonicalize_replicas(&mut replicas)?;
+        tablet.replicas = replicas;
+        Ok(())
+    }
+
     pub fn validate(&self) -> Result<(), RangeResizeError> {
         validate_tablets(&self.tablets)?;
 
@@ -412,6 +426,10 @@ impl LifecycleResizePlan {
     pub fn topology_epoch(&self) -> u64 {
         self.controller.topology_epoch
     }
+
+    pub fn from_generation(&self) -> u64 {
+        self.controller.from_generation
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -465,6 +483,14 @@ impl TabletRangeLifecycle {
 
     pub fn last_resize_tick(&self) -> Option<u64> {
         self.last_resize_tick
+    }
+
+    pub(crate) fn replace_replicas_by_slot(
+        &mut self,
+        slot: usize,
+        replicas: &[NodeId],
+    ) -> Result<(), RangeResizeError> {
+        self.map.replace_replicas_by_slot(slot, replicas)
     }
 
     pub fn resize_state(&self) -> Result<TabletResizeState, LifecycleResizeError> {

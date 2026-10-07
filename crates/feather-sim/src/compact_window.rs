@@ -128,6 +128,18 @@ impl CompactWindowScheduler {
         self.cluster.epoch
     }
 
+    pub fn catalog_generation(&self) -> u64 {
+        self.catalog.generation()
+    }
+
+    pub fn cluster(&self) -> &Cluster {
+        &self.cluster
+    }
+
+    pub fn node_health(&self, node_id: NodeId) -> Option<NodeHealth> {
+        self.health.get(&node_id).copied()
+    }
+
     pub fn actual(&self) -> &CompactPlacement {
         &self.actual
     }
