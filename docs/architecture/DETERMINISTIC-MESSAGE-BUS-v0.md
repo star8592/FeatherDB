@@ -304,3 +304,14 @@ This is alignment of mechanism, not a claim of comparable maturity.
 All future simulated protocols must use the shared deterministic message bus or a thin adapter over it.
 
 No protocol-specific private network simulator should be introduced.
+
+
+## First real protocol user: Membership
+
+The shared bus is now used by an executable SWIM-style membership state machine rather than only synthetic ScheduledMessage workloads.
+
+Membership uses MessageClass::Membership for direct Ping/Ack, indirect PingReq relay traffic, and bounded piggyback membership updates. A deterministic 100-node campaign exercises the protocol under Delay/Drop/Duplicate/Reorder/Partition/Heal plus crash/restart.
+
+The experiment also exposed a simulator RTT/configuration bug: explicit event-loop delivery means direct Ping/Ack requires at least two ticks and the indirect relay path at least four. MembershipConfig now validates those minima.
+
+See docs/architecture/MEMBERSHIP-v0.md and docs/experiments/2026-10-07-swim-membership.md.

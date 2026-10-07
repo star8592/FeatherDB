@@ -6,6 +6,7 @@ pub mod compact_migration;
 pub mod compact_window;
 pub mod fault;
 mod hash;
+pub mod membership;
 pub mod message_replay;
 pub mod metrics;
 pub mod migration;
@@ -29,6 +30,11 @@ pub use compact_window::{
 pub use fault::{
     FaultAction, FaultEvent, FaultReplayReport, FaultTrace, FaultTraceParseError,
     apply_network_fault_action, replay_migration_faults, replay_migration_faults_with_network,
+};
+
+pub use membership::{
+    MemberState, MemberStatus, MemberUpdate, MembershipCluster, MembershipConfig,
+    MembershipConfigError, MembershipStats, SwimNode,
 };
 
 pub use message_replay::{
