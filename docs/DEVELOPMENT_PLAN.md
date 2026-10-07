@@ -321,7 +321,17 @@ Fault tests:
 - ADR-0001: still Proposed.
 - ADR-0002: still Proposed.
 
-Next priority: Fjall/redb production DurableStore benchmarks, QUIC transport substrate benchmark, then wire the selected adapters under the same deterministic/production intent interfaces.
+### Production storage substrate benchmark
+
+Fjall 3.1.12 and redb 4.3.0 now have a reproducible standalone release benchmark on both rotational ext4 storage and a directional NVMe check. Equal durability semantics are used (Fjall SyncAll, redb Immediate).
+
+HDD three-run medians show Fjall ~1.74x faster for 100 x 1K durable streaming batches and ~26% smaller files, while redb has lower RSS, faster reopen and somewhat faster sparse durable control writes. NVMe collapses the streaming difference to near parity. A naive Fjall 8 MiB memtable/cache profile failed to lower RSS and increased disk footprint, so it is explicitly rejected.
+
+Current hypothesis is single-engine Fjall V0 rather than redb-control + Fjall-data, because control commits are sparse and dual engines expand the recovery/operations surface. This remains conditional on a real Fjall durable adapter, concurrency/compaction tests and an explicit Rust 1.90 MSRV decision.
+
+See docs/architecture/STORAGE-SUBSTRATE-v0.md and docs/experiments/2026-10-07-storage-backend-bench.md.
+
+Next priority: real Fjall DurableStore adapter against PREPARED/CURRENT recovery, concurrent-writer/compaction-tail storage tests, explicit Rust 1.90 MSRV ADR, then QUIC transport substrate benchmark.
 
 ### Placement planner hypothesis
 

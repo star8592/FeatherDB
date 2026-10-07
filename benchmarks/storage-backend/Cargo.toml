@@ -1,0 +1,12 @@
+[workspace]
+
+[package]
+name = "feather-storage-bench"
+version = "0.0.0"
+edition = "2024"
+rust-version = "1.90"
+publish = false
+
+[dependencies]
+fjall = "3.1.12"
+redb = "4.3.0"
