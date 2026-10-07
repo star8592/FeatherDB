@@ -7,3 +7,4 @@ publish = false
 
 [dependencies]
 feather-storage-api = { path = "../feather-storage-api" }
+feather-transport-api = { path = "../feather-transport-api" }

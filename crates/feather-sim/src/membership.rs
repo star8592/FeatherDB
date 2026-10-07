@@ -2,7 +2,7 @@ use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 use crate::model::NodeId;
 use crate::transport::{
-    MessageBusLimits, MessageClass, MessageSend, SimClock, SimMessage, SimNetwork,
+    MessageBusLimits, MessageClass, MessageSink, MessageSubmit, SimClock, SimMessage, SimNetwork,
 };
 
 const WIRE_VERSION: u8 = 1;
@@ -295,7 +295,7 @@ impl SwimNode {
         base_ticks.saturating_mul(u64::from(self.awareness_score).saturating_add(1))
     }
 
-    pub fn tick(&mut self, now_tick: u64, network: &mut SimNetwork) {
+    pub fn tick(&mut self, now_tick: u64, network: &mut impl MessageSink) {
         self.expire_relays(now_tick);
         self.expire_suspicions(now_tick);
 
@@ -313,7 +313,12 @@ impl SwimNode {
         }
     }
 
-    pub fn handle_message(&mut self, now_tick: u64, message: SimMessage, network: &mut SimNetwork) {
+    pub fn handle_message(
+        &mut self,
+        now_tick: u64,
+        message: SimMessage,
+        network: &mut impl MessageSink,
+    ) {
         if message.class != MessageClass::Membership || message.to != self.id {
             return;
         }
@@ -360,7 +365,7 @@ impl SwimNode {
         }
     }
 
-    pub fn graceful_leave(&mut self, now_tick: u64, network: &mut SimNetwork) -> bool {
+    pub fn graceful_leave(&mut self, now_tick: u64, network: &mut impl MessageSink) -> bool {
         let Some(current) = self.members.get(&self.id).copied() else {
             return false;
         };
@@ -419,7 +424,7 @@ impl SwimNode {
         true
     }
 
-    pub fn begin_join(&mut self, now_tick: u64, seed: NodeId, network: &mut SimNetwork) {
+    pub fn begin_join(&mut self, now_tick: u64, seed: NodeId, network: &mut impl MessageSink) {
         self.restart(now_tick);
         self.joined = false;
         self.join_seed = Some(seed);
@@ -455,7 +460,7 @@ impl SwimNode {
         });
     }
 
-    fn start_probe(&mut self, now_tick: u64, network: &mut SimNetwork) {
+    fn start_probe(&mut self, now_tick: u64, network: &mut impl MessageSink) {
         let Some(target) = self.select_probe_target() else {
             self.next_probe_at =
                 now_tick.saturating_add(self.scaled_timeout(self.config.probe_interval_ticks));
@@ -478,7 +483,7 @@ impl SwimNode {
         self.stats.direct_probes_started = self.stats.direct_probes_started.saturating_add(1);
     }
 
-    fn advance_pending_probe(&mut self, now_tick: u64, network: &mut SimNetwork) {
+    fn advance_pending_probe(&mut self, now_tick: u64, network: &mut impl MessageSink) {
         let Some(pending) = self.pending_probe else {
             return;
         };
@@ -541,7 +546,7 @@ impl SwimNode {
         now_tick: u64,
         sender: NodeId,
         wire: WireMessage,
-        network: &mut SimNetwork,
+        network: &mut impl MessageSink,
     ) {
         if wire.probe.origin == self.id {
             if self
@@ -570,7 +575,12 @@ impl SwimNode {
         );
     }
 
-    fn handle_ping_req(&mut self, now_tick: u64, wire: WireMessage, network: &mut SimNetwork) {
+    fn handle_ping_req(
+        &mut self,
+        now_tick: u64,
+        wire: WireMessage,
+        network: &mut impl MessageSink,
+    ) {
         if wire.target == self.id {
             self.send_wire(
                 now_tick,
@@ -786,7 +796,7 @@ impl SwimNode {
         candidates
     }
 
-    fn send_join_request(&mut self, now_tick: u64, network: &mut SimNetwork) {
+    fn send_join_request(&mut self, now_tick: u64, network: &mut impl MessageSink) {
         let Some(seed) = self.join_seed else {
             return;
         };
@@ -823,7 +833,7 @@ impl SwimNode {
         &mut self,
         now_tick: u64,
         joining_node: NodeId,
-        network: &mut SimNetwork,
+        network: &mut impl MessageSink,
     ) {
         let updates = self
             .members
@@ -857,11 +867,12 @@ impl SwimNode {
         to: NodeId,
         wire: WireMessage,
         mark_piggyback_attempts: bool,
-        network: &mut SimNetwork,
-    ) -> MessageSend {
+        network: &mut impl MessageSink,
+    ) -> MessageSubmit {
         let payload = encode_wire(&wire);
-        let result = network.send_message(now_tick, self.id, to, MessageClass::Membership, payload);
-        if matches!(result, MessageSend::Backpressure { .. }) {
+        let result =
+            network.submit_message(now_tick, self.id, to, MessageClass::Membership, payload);
+        if matches!(result, MessageSubmit::Backpressure { .. }) {
             self.stats.backpressured_messages = self.stats.backpressured_messages.saturating_add(1);
         } else if mark_piggyback_attempts {
             self.mark_update_attempts();
@@ -876,8 +887,8 @@ impl SwimNode {
         kind: WireKind,
         probe: ProbeId,
         target: NodeId,
-        network: &mut SimNetwork,
-    ) -> MessageSend {
+        network: &mut impl MessageSink,
+    ) -> MessageSubmit {
         self.send_wire_message(
             now_tick,
             to,
@@ -1192,6 +1203,45 @@ mod tests {
             },
         )
         .unwrap()
+    }
+
+    #[derive(Default)]
+    struct RecordingSink {
+        sent: Vec<(NodeId, NodeId, MessageClass, Vec<u8>)>,
+        next_message_id: u64,
+    }
+
+    impl MessageSink for RecordingSink {
+        fn submit_message(
+            &mut self,
+            _now_tick: u64,
+            from: NodeId,
+            to: NodeId,
+            class: MessageClass,
+            payload: Vec<u8>,
+        ) -> MessageSubmit {
+            self.next_message_id = self.next_message_id.saturating_add(1);
+            self.sent.push((from, to, class, payload));
+            MessageSubmit::Accepted {
+                message_id: self.next_message_id,
+            }
+        }
+    }
+
+    #[test]
+    fn swim_protocol_emits_probe_through_transport_neutral_message_sink() {
+        let mut node = SwimNode::new(1, &[1, 2], config()).unwrap();
+        let mut sink = RecordingSink::default();
+
+        node.tick(0, &mut sink);
+
+        assert_eq!(sink.sent.len(), 1);
+        let (from, to, class, payload) = &sink.sent[0];
+        assert_eq!((*from, *to, *class), (1, 2, MessageClass::Membership));
+        let wire = decode_wire(payload).expect("membership wire payload");
+        assert_eq!(wire.kind, WireKind::Ping);
+        assert_eq!(wire.probe.origin, 1);
+        assert_eq!(wire.target, 2);
     }
 
     #[test]

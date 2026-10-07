@@ -18,6 +18,12 @@ updates:
       interval: daily
     open-pull-requests-limit: 10
 
+  - package-ecosystem: cargo
+    directory: "/benchmarks/quic-substrate"
+    schedule:
+      interval: daily
+    open-pull-requests-limit: 10
+
   - package-ecosystem: github-actions
     directory: "/"
     schedule:

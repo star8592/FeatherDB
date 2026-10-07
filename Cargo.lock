@@ -110,6 +110,7 @@ name = "feather-sim"
 version = "0.0.1"
 dependencies = [
  "feather-storage-api",
+ "feather-transport-api",
 ]
 
 [[package]]
@@ -125,6 +126,10 @@ dependencies = [
  "fjall",
  "tempfile",
 ]
+
+[[package]]
+name = "feather-transport-api"
+version = "0.0.1"
 
 [[package]]
 name = "fjall"

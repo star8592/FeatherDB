@@ -353,7 +353,11 @@ Current hypothesis is single-engine Fjall V0 rather than redb-control + Fjall-da
 
 See docs/architecture/STORAGE-SUBSTRATE-v0.md and docs/experiments/2026-10-07-storage-backend-bench.md.
 
-Next priority: QUIC transport substrate benchmark and bounded production transport adapter; then wire leaderless data messages over production storage/transport interfaces.
+### QUIC substrate benchmark
+
+Quinn 0.11.12 + Tokio 1.53.2 + rustls 0.23.45 now pass a three-run loopback TLS/QUIC benchmark: median handshake 1.024 ms, 512-byte stream RTT p50/p95/p99 22/36/117 us, and 64 MiB duplex echo ~691 MiB/s. Quinn is accepted as the V0 core substrate candidate. Iroh remains an optional future NAT/relay connectivity layer rather than a mandatory dependency. See docs/architecture/NETWORK-SUBSTRATE-v0.md.
+
+Next priority: implement a bounded production Quinn adapter with reconnect/backpressure, then wire leaderless data messages over production storage/transport interfaces and build the first three-node featherd prototype.
 
 ### Placement planner hypothesis
 

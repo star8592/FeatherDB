@@ -106,9 +106,9 @@ pub use split_boundary::{
 };
 
 pub use transport::{
-    DirectMigrationTransport, MessageAdvanceReport, MessageBusLimits, MessageClass, MessageSend,
-    MigrationTransport, SimClock, SimMessage, SimNetwork, TransferPoll, TransferRequest,
-    TransferSubmit,
+    DirectMigrationTransport, MessageAdvanceReport, MessageBusLimits, MessageClass,
+    MessageEnvelope, MessageSend, MessageSink, MessageSubmit, MigrationTransport, SimClock,
+    SimMessage, SimNetwork, TransferPoll, TransferRequest, TransferSubmit,
 };
 
 pub use topology_snapshot::{
