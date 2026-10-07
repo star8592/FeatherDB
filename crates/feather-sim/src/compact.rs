@@ -1,13 +1,16 @@
 use std::collections::BTreeMap;
 use std::mem::size_of;
 
+use crate::compact_catalog::CompactTabletCatalog;
 use crate::model::{Cluster, NodeId, Placement, TabletId};
 use crate::placement::{FailureDomainPolicy, weighted_rendezvous_replicas};
+use crate::range_resize::RangeTabletMap;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum CompactPlacementError {
     SizeOverflow,
     ShapeMismatch,
+    ReplicaCountMismatch,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -46,6 +49,62 @@ impl CompactPlacement {
         })
     }
 
+    pub fn weighted_rendezvous_for_catalog(
+        cluster: &Cluster,
+        catalog: &CompactTabletCatalog,
+        policy: FailureDomainPolicy,
+    ) -> Result<Self, CompactPlacementError> {
+        let replica_count = cluster
+            .replication_factor
+            .min(cluster.eligible_node_count());
+        let capacity = catalog
+            .tablet_count()
+            .checked_mul(replica_count)
+            .ok_or(CompactPlacementError::SizeOverflow)?;
+
+        let mut replicas = Vec::with_capacity(capacity);
+        for tablet_id in catalog.tablet_ids() {
+            let selected = weighted_rendezvous_replicas(cluster, *tablet_id, policy);
+            debug_assert_eq!(selected.len(), replica_count);
+            replicas.extend_from_slice(&selected);
+        }
+
+        Ok(Self {
+            tablet_count: catalog.tablet_count() as u64,
+            replica_count,
+            replicas,
+        })
+    }
+
+    pub fn from_range_map(map: &RangeTabletMap) -> Result<Self, CompactPlacementError> {
+        let Some(first) = map.tablets().first() else {
+            return Err(CompactPlacementError::ShapeMismatch);
+        };
+        let replica_count = first.replicas.len();
+        if map
+            .tablets()
+            .iter()
+            .any(|tablet| tablet.replicas.len() != replica_count)
+        {
+            return Err(CompactPlacementError::ReplicaCountMismatch);
+        }
+
+        let capacity = map
+            .tablet_count()
+            .checked_mul(replica_count)
+            .ok_or(CompactPlacementError::SizeOverflow)?;
+        let mut replicas = Vec::with_capacity(capacity);
+        for tablet in map.tablets() {
+            replicas.extend_from_slice(&tablet.replicas);
+        }
+
+        Ok(Self {
+            tablet_count: map.tablet_count() as u64,
+            replica_count,
+            replicas,
+        })
+    }
+
     pub fn tablet_count(&self) -> u64 {
         self.tablet_count
     }
@@ -54,18 +113,24 @@ impl CompactPlacement {
         self.replica_count
     }
 
-    pub fn replicas(&self, tablet_id: TabletId) -> Option<&[NodeId]> {
-        if tablet_id >= self.tablet_count {
+    pub fn replicas_by_slot(&self, slot: usize) -> Option<&[NodeId]> {
+        if slot >= self.tablet_count as usize {
             return None;
         }
         if self.replica_count == 0 {
             return Some(&[]);
         }
 
-        let index = usize::try_from(tablet_id).ok()?;
-        let start = index.checked_mul(self.replica_count)?;
+        let start = slot.checked_mul(self.replica_count)?;
         let end = start.checked_add(self.replica_count)?;
         self.replicas.get(start..end)
+    }
+
+    /// Simulator convenience for contiguous slot IDs 0..tablet_count.
+    /// Production-like stable TabletId routing should go through CompactTabletCatalog.
+    pub fn replicas(&self, tablet_id: TabletId) -> Option<&[NodeId]> {
+        let slot = usize::try_from(tablet_id).ok()?;
+        self.replicas_by_slot(slot)
     }
 
     pub fn logical_replica_bytes(&self) -> usize {
@@ -295,6 +360,53 @@ mod tests {
         .unwrap();
 
         assert_eq!(compact.zone_collision_count(&cluster), 0);
+    }
+
+    #[test]
+    fn compact_placement_can_share_physical_range_catalog_order() {
+        let mut map = RangeTabletMap::single(100, 1_000, vec![3, 1, 2]).unwrap();
+        for _ in 0..4 {
+            let split = map.plan_split_all(9).unwrap();
+            map.commit(&split, 9).unwrap();
+        }
+
+        let compact = CompactPlacement::from_range_map(&map).unwrap();
+        assert_eq!(compact.tablet_count(), map.tablet_count() as u64);
+
+        for (slot, tablet) in map.tablets().iter().enumerate() {
+            assert_eq!(
+                compact.replicas_by_slot(slot),
+                Some(tablet.replicas.as_slice())
+            );
+        }
+    }
+
+    #[test]
+    fn catalog_wrh_hashes_stable_tablet_id_not_slot() {
+        let mut map = RangeTabletMap::single(10_000, 1_000, vec![1, 2]).unwrap();
+        let split = map.plan_split_all(4).unwrap();
+        map.commit(&split, 4).unwrap();
+
+        let catalog = CompactTabletCatalog::from_range_map(&map).unwrap();
+        let cluster = cluster(0);
+        let compact = CompactPlacement::weighted_rendezvous_for_catalog(
+            &cluster,
+            &catalog,
+            FailureDomainPolicy::HIERARCHICAL,
+        )
+        .unwrap();
+
+        for slot in 0..catalog.tablet_count() {
+            let tablet_id = catalog.tablet_id(slot).unwrap();
+            let expected = weighted_rendezvous_replicas(
+                &cluster,
+                tablet_id,
+                FailureDomainPolicy::HIERARCHICAL,
+            );
+            assert_eq!(compact.replicas_by_slot(slot), Some(expected.as_slice()));
+        }
+
+        assert_ne!(catalog.tablet_id(0), Some(0));
     }
 
     #[test]

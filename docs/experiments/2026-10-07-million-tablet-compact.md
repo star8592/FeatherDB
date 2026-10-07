@@ -124,3 +124,37 @@ Do not promote them to the production metadata/scheduler format until:
 2. Repair and epoch semantics are preserved with a bounded active window;
 3. deterministic network/fault tests run against that bounded scheduler;
 4. memory remains bounded under churn, not just one static join.
+
+
+## Stable identity catalog follow-up
+
+The first compact experiment used implicit simulator slots. A follow-up implementation now separates stable tablet identity/range metadata into CompactTabletCatalog.
+
+Per-tablet raw catalog fields:
+
+    TabletId = 8 bytes
+    range start = 8 bytes
+    bytes = 8 bytes
+
+So a 1M-tablet catalog is approximately 24 MB of raw flat-array data.
+
+With RF=2 actual + desired ownership arrays:
+
+    catalog = 24 MB
+    actual = 16 MB
+    desired = 16 MB
+    core total = 56 MB
+
+The catalog is shared by both placements.
+
+Correctness tests verify:
+
+- token routing exactly matches RangeTabletMap;
+- stable IDs survive compact conversion;
+- generation/next-ID metadata is retained;
+- catalog-backed WRH hashes the stable TabletId, not slot index;
+- catalog-backed lazy migration emits the same ordered pure-rebalance moves as the eager scheduler.
+
+This removes the main identity objection to slot-based compact placement without reintroducing per-tablet object allocations.
+
+Reverse TabletId -> slot acceleration remains intentionally unfrozen and must be benchmarked before adding a permanent million-entry index.

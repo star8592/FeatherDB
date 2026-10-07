@@ -133,7 +133,7 @@ Implemented research path:
 - the 1M join produces 847,638 moves, while the lazy cursor peaks at one buffered move / 48 bytes in the tested RF=2 scenario;
 - pure-rebalance move ordering matches the eager MigrationScheduler exactly in a direct executable comparison.
 
-Important limitation: compact simulator slots are not yet a production TabletId/range catalog. Stable split/merge identities require a separate compact slot -> TabletId/range metadata layer.
+Stable identity follow-up is implemented: CompactTabletCatalog stores shared TabletId/range-start/bytes arrays, catalog-backed WRH hashes stable TabletId, and catalog-backed lazy migration preserves eager scheduler ordering. Reverse TabletId -> slot indexing remains unfrozen pending benchmark evidence.
 
 See docs/architecture/COMPACT-METADATA-v0.md and docs/experiments/2026-10-07-million-tablet-compact.md.
 
@@ -300,12 +300,12 @@ Fault tests:
 - Phase 1.3: partial; strong-node join and failure-domain-pressure scenarios implemented.
 - RF=2 single-node removal movement now matches a failure-domain-aware constrained lower bound exactly.
 - Tablet resize controller: logical count control implemented with hysteresis, cooldown, metadata budget, epoch/generation fencing, and replay idempotency.
-- Tests: 100 passing.
+- Tests: 107 passing.
 - First experiment: `docs/experiments/2026-10-06-placement-baseline.md`.
 - ADR-0001: still Proposed.
 - ADR-0002: still Proposed.
 
-Next priority: bounded active migration window over compact actual/desired maps, compact stable TabletId/range catalog, general deterministic message bus, then production-substrate benchmarks.
+Next priority: bounded active migration window over compact actual/desired maps, reverse TabletId-index benchmark, general deterministic message bus, then production-substrate benchmarks.
 
 ### Placement planner hypothesis
 

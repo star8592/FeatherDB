@@ -1,4 +1,5 @@
 use crate::compact::{CompactPlacement, CompactPlacementError};
+use crate::compact_catalog::CompactTabletCatalog;
 use crate::model::{NodeId, TabletId};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -12,6 +13,7 @@ pub struct CompactMigrationMove {
 pub struct CompactMigrationCursor<'a> {
     actual: &'a CompactPlacement,
     desired: &'a CompactPlacement,
+    catalog: Option<&'a CompactTabletCatalog>,
     next_tablet: u64,
     pending: Vec<CompactMigrationMove>,
     pending_index: usize,
@@ -32,6 +34,30 @@ impl<'a> CompactMigrationCursor<'a> {
         Ok(Self {
             actual,
             desired,
+            catalog: None,
+            next_tablet: 0,
+            pending: Vec::with_capacity(actual.replica_count()),
+            pending_index: 0,
+            peak_buffered_moves: 0,
+        })
+    }
+
+    pub fn new_with_catalog(
+        actual: &'a CompactPlacement,
+        desired: &'a CompactPlacement,
+        catalog: &'a CompactTabletCatalog,
+    ) -> Result<Self, CompactPlacementError> {
+        if actual.tablet_count() != desired.tablet_count()
+            || actual.replica_count() != desired.replica_count()
+            || actual.tablet_count() != catalog.tablet_count() as u64
+        {
+            return Err(CompactPlacementError::ShapeMismatch);
+        }
+
+        Ok(Self {
+            actual,
+            desired,
+            catalog: Some(catalog),
             next_tablet: 0,
             pending: Vec::with_capacity(actual.replica_count()),
             pending_index: 0,
@@ -51,18 +77,22 @@ impl<'a> CompactMigrationCursor<'a> {
 
     fn refill(&mut self) -> bool {
         while self.next_tablet < self.actual.tablet_count() {
-            let tablet_id = self.next_tablet;
+            let slot = self.next_tablet as usize;
+            let tablet_id = self
+                .catalog
+                .and_then(|catalog| catalog.tablet_id(slot))
+                .unwrap_or(self.next_tablet);
             self.next_tablet += 1;
             self.pending.clear();
             self.pending_index = 0;
 
             let old = self
                 .actual
-                .replicas(tablet_id)
+                .replicas_by_slot(slot)
                 .expect("compact shape validated");
             let new = self
                 .desired
-                .replicas(tablet_id)
+                .replicas_by_slot(slot)
                 .expect("compact shape validated");
 
             let removed: Vec<_> = old
@@ -122,8 +152,10 @@ mod tests {
     use std::collections::BTreeMap;
 
     use super::*;
-    use crate::model::{AdminState, Cluster, Node};
-    use crate::placement::FailureDomainPolicy;
+    use crate::compact_catalog::CompactTabletCatalog;
+    use crate::model::{AdminState, Cluster, Node, Tablet};
+    use crate::placement::{FailureDomainPolicy, PlacementStrategy};
+    use crate::range_resize::RangeTabletMap;
 
     fn node(id: u64, weight: u32, zone: &str) -> Node {
         Node {
@@ -258,6 +290,83 @@ mod tests {
             .collect();
 
         assert_eq!(lazy_moves, eager_moves);
+    }
+
+    #[test]
+    fn catalog_cursor_preserves_stable_tablet_ids_and_eager_order() {
+        use crate::migration::{MigrationBudget, MigrationScheduler};
+
+        let mut range_map = RangeTabletMap::single(10_000, 1_000, vec![1, 2]).unwrap();
+        for _ in 0..3 {
+            let split = range_map.plan_split_all(5).unwrap();
+            range_map.commit(&split, 5).unwrap();
+        }
+        let catalog = CompactTabletCatalog::from_range_map(&range_map).unwrap();
+
+        let mut before_cluster = cluster();
+        before_cluster.tablets = catalog
+            .tablet_ids()
+            .iter()
+            .enumerate()
+            .map(|(slot, id)| Tablet {
+                id: *id,
+                bytes: catalog.bytes(slot).unwrap(),
+            })
+            .collect();
+
+        let mut after_cluster = before_cluster.clone();
+        after_cluster.epoch = 2;
+        after_cluster.nodes.insert(4, node(4, 8, "d"));
+
+        let actual = PlacementStrategy::WeightedRendezvous
+            .place(&before_cluster, FailureDomainPolicy::HIERARCHICAL);
+        let desired = PlacementStrategy::WeightedRendezvous
+            .place(&after_cluster, FailureDomainPolicy::HIERARCHICAL);
+
+        let eager = MigrationScheduler::new(
+            after_cluster.clone(),
+            FailureDomainPolicy::HIERARCHICAL,
+            actual,
+            desired,
+            MigrationBudget::conservative(),
+        )
+        .unwrap();
+        let eager_moves: Vec<_> = eager
+            .tasks()
+            .iter()
+            .map(|task| (task.tablet_id, task.owner_to_replace, task.to))
+            .collect();
+
+        let compact_before = CompactPlacement::weighted_rendezvous_for_catalog(
+            &before_cluster,
+            &catalog,
+            FailureDomainPolicy::HIERARCHICAL,
+        )
+        .unwrap();
+        let compact_after = CompactPlacement::weighted_rendezvous_for_catalog(
+            &after_cluster,
+            &catalog,
+            FailureDomainPolicy::HIERARCHICAL,
+        )
+        .unwrap();
+
+        let lazy_moves: Vec<_> =
+            CompactMigrationCursor::new_with_catalog(&compact_before, &compact_after, &catalog)
+                .unwrap()
+                .map(|movement| (movement.tablet_id, movement.owner_to_replace, movement.to))
+                .collect();
+
+        assert_eq!(lazy_moves, eager_moves);
+        assert!(
+            lazy_moves
+                .iter()
+                .all(|(tablet_id, _, _)| catalog.tablet_ids().contains(tablet_id))
+        );
+        assert!(
+            lazy_moves
+                .iter()
+                .all(|(tablet_id, _, _)| *tablet_id >= 10_000)
+        );
     }
 
     #[test]

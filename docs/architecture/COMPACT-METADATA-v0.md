@@ -167,30 +167,68 @@ The protocol-relevant result is stronger and simpler:
     replica ownership itself only needs a compact flat representation,
     and eagerly materializing all migration work is unnecessary.
 
-## Production identity caveat
+## Compact stable TabletId/range catalog
 
-CompactPlacement currently assumes simulation tablet slots:
+The previously identified stable-identity gap now has an executable research implementation: CompactTabletCatalog.
 
-    0..tablet_count
+The catalog stores three flat arrays in range order:
 
-Physical RangeTabletMap uses stable TabletId values created by split/merge, and those IDs are not guaranteed to remain contiguous.
+    TabletId      8 bytes/tablet
+    range_start   8 bytes/tablet
+    bytes         8 bytes/tablet
 
-Therefore CompactPlacement must not be copied directly as the production metadata format.
+The range end is implied by the next slot's start. The final slot ends at 2^64.
 
-A production candidate should separate:
+Therefore the core catalog payload is:
 
-    compact slot/index
-      -> stable TabletId / range metadata catalog
+    24 bytes/tablet
 
-from:
+For 1,000,000 tablets:
 
-    slot
-      -> actual replicas
-      -> desired replicas
+    ~24,000,000 bytes
 
-Actual and desired placement can share the same tablet catalog rather than duplicating identity/range metadata.
+Actual and desired placement share this catalog and retain only replica arrays.
 
-This likely adds compact arrays for TabletId, boundaries and size/telemetry fields, but avoids per-tablet map/Vec allocations.
+For RF=2, the raw flat-array core becomes approximately:
+
+    shared catalog        24 MB
+    actual replicas       16 MB
+    desired replicas      16 MB
+    ---------------------------
+    total                 56 MB
+
+This excludes allocator slack, runtime indexes, telemetry, active tasks and other control-plane state, so it is not a full process-memory claim.
+
+Executable tests verify that CompactTabletCatalog:
+
+- preserves RangeTabletMap generation and next TabletId;
+- preserves stable TabletId values after repeated split/merge;
+- routes sampled tokens to exactly the same TabletId as RangeTabletMap;
+- preserves total bytes;
+- reconstructs implicit range ends exactly.
+
+CompactPlacement now supports weighted_rendezvous_for_catalog(). WRH hashes the stable TabletId from the catalog, not the compact slot number.
+
+CompactMigrationCursor also supports a catalog-backed mode. A direct test verifies that catalog-backed lazy moves preserve stable TabletId and exactly match the eager scheduler's pure-rebalance order.
+
+### Remaining identity/index question
+
+The catalog currently optimizes the hot path:
+
+    token -> range slot -> TabletId / replicas
+
+It does not yet add a permanent TabletId -> slot hash/tree index.
+
+Adding a million-entry object-heavy index by default would partially recreate the memory problem we just removed.
+
+Before freezing a reverse-lookup structure, benchmark alternatives such as:
+
+- sorted/compact ID index when lifecycle ordering permits;
+- compact open-addressing hash table;
+- sparse/ephemeral indexes for active topology work;
+- operation-local slot handles.
+
+Stable identity is preserved now; reverse-lookup acceleration remains a measured design choice rather than an automatic BTreeMap.
 
 ## Scheduler decision
 

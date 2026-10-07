@@ -1,6 +1,7 @@
 #![forbid(unsafe_code)]
 
 pub mod compact;
+pub mod compact_catalog;
 pub mod compact_migration;
 pub mod fault;
 mod hash;
@@ -15,6 +16,7 @@ pub mod split_boundary;
 pub mod transport;
 
 pub use compact::{CompactPlacement, CompactPlacementError};
+pub use compact_catalog::{CompactCatalogError, CompactTabletCatalog};
 pub use compact_migration::{CompactMigrationCursor, CompactMigrationMove};
 
 pub use fault::{
