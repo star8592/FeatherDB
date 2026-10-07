@@ -19,6 +19,7 @@ pub mod resize;
 pub mod reverse_index;
 pub mod runtime_coordinator;
 pub mod split_boundary;
+pub mod topology_snapshot;
 pub mod transport;
 
 pub use compact::{CompactPlacement, CompactPlacementError};
@@ -95,3 +96,5 @@ pub use transport::{
     MigrationTransport, SimClock, SimMessage, SimNetwork, TransferPoll, TransferRequest,
     TransferSubmit,
 };
+
+pub use topology_snapshot::{TopologySnapshot, TopologySnapshotError};

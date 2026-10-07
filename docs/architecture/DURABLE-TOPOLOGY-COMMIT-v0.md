@@ -76,3 +76,23 @@ A convenience persist-current-epoch call would look durable while preserving the
 5. crash at every state-machine edge;
 6. inject V3 disk faults at every edge;
 7. only then route RuntimeCoordinator topology/resize publication through the durable transaction layer.
+
+## Executable snapshot and PREPARED layer
+
+The first replay-material layer is now implemented.
+
+TopologySnapshot deterministically encodes the full RangeTabletMap lifecycle state: stable TabletIds, u128 range boundaries, replica sets, bytes, generation, next TabletId and resize cooldown metadata.
+
+PreparedTopologyTxn persists transaction id, source epoch/generation and the complete target snapshot. The PREPARED record and target snapshot are independently checksummed.
+
+DurableTopologyTxnWriter now models:
+
+    PREPARED Put -> Sync -> Prepared
+    explicit apply acknowledgement
+    CURRENT Put -> Sync -> Complete
+
+Recovery returns Current, ReplayPrepared, Empty or RecoveryConflict. It never reconstructs a target from generation numbers alone.
+
+Crash tests cover pre-PREPARED-sync, post-PREPARED/pre-apply, and post-current-Put/pre-current-Sync boundaries.
+
+RuntimeCoordinator wiring remains the next step; the replay substrate is now executable rather than only documented.

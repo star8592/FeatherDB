@@ -72,6 +72,20 @@ pub struct RangeTabletMap {
 }
 
 impl RangeTabletMap {
+    pub(crate) fn from_parts(
+        generation: u64,
+        next_tablet_id: TabletId,
+        tablets: Vec<RangeTablet>,
+    ) -> Result<Self, RangeResizeError> {
+        let map = Self {
+            generation,
+            next_tablet_id,
+            tablets,
+        };
+        map.validate()?;
+        Ok(map)
+    }
+
     pub fn single(
         tablet_id: TabletId,
         bytes: u64,
@@ -469,6 +483,17 @@ pub struct TabletRangeLifecycle {
 }
 
 impl TabletRangeLifecycle {
+    pub(crate) fn from_parts(
+        map: RangeTabletMap,
+        last_resize_tick: Option<u64>,
+    ) -> Result<Self, RangeResizeError> {
+        map.validate()?;
+        Ok(Self {
+            map,
+            last_resize_tick,
+        })
+    }
+
     pub fn new(map: RangeTabletMap) -> Result<Self, RangeResizeError> {
         map.validate()?;
         Ok(Self {
