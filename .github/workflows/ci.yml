@@ -19,7 +19,7 @@ jobs:
         uses: gitleaks/gitleaks-action@v3.0.0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-      - uses: dtolnay/rust-toolchain@1.99.0
+      - uses: dtolnay/rust-toolchain@1.120.0
         with:
           components: rustfmt, clippy
       - name: Toolchain
