@@ -132,10 +132,14 @@ Implemented research path:
 - CompactMigrationCursor reconstructs future moves lazily with RF-bounded buffering;
 - the 1M join produces 847,638 moves, while the lazy cursor peaks at one buffered move / 48 bytes in the tested RF=2 scenario;
 - pure-rebalance move ordering matches the eager MigrationScheduler exactly in a direct executable comparison.
+- CompactWindowScheduler now materializes only a bounded tablet window into the existing MigrationScheduler;
+- global forced Repair is completed before ordinary Rebalance materialization;
+- a 1M-tablet execution converges with 1024 peak full tasks (~90 KB task structs) and ~58 MB observed RSS in the synthetic release lab;
+- window size and actual copy concurrency are independently controlled.
 
 Stable identity follow-up is implemented: CompactTabletCatalog stores shared TabletId/range-start/bytes arrays, catalog-backed WRH hashes stable TabletId, and catalog-backed lazy migration preserves eager scheduler ordering. Reverse TabletId -> slot indexing remains unfrozen pending benchmark evidence.
 
-See docs/architecture/COMPACT-METADATA-v0.md and docs/experiments/2026-10-07-million-tablet-compact.md.
+See docs/architecture/COMPACT-METADATA-v0.md, docs/architecture/BOUNDED-MIGRATION-WINDOW-v0.md, docs/experiments/2026-10-07-million-tablet-compact.md, and docs/experiments/2026-10-07-bounded-million-migration.md.
 
 ## Phase 2 — migration model
 
@@ -300,12 +304,12 @@ Fault tests:
 - Phase 1.3: partial; strong-node join and failure-domain-pressure scenarios implemented.
 - RF=2 single-node removal movement now matches a failure-domain-aware constrained lower bound exactly.
 - Tablet resize controller: logical count control implemented with hysteresis, cooldown, metadata budget, epoch/generation fencing, and replay idempotency.
-- Tests: 107 passing.
+- Tests: 113 passing.
 - First experiment: `docs/experiments/2026-10-06-placement-baseline.md`.
 - ADR-0001: still Proposed.
 - ADR-0002: still Proposed.
 
-Next priority: bounded active migration window over compact actual/desired maps, reverse TabletId-index benchmark, general deterministic message bus, then production-substrate benchmarks.
+Next priority: active-window epoch replacement/fencing, reverse TabletId-index benchmark, general deterministic message bus, then production-substrate benchmarks.
 
 ### Placement planner hypothesis
 

@@ -6,6 +6,9 @@ pub enum CompactCatalogError {
     Range(RangeResizeError),
     StartOverflow,
     CountMismatch,
+    ZeroTablets,
+    SizeOverflow,
+    IdOverflow,
 }
 
 impl From<RangeResizeError> for CompactCatalogError {
@@ -42,6 +45,47 @@ impl CompactTabletCatalog {
         Ok(Self {
             generation: map.generation(),
             next_tablet_id: map.next_tablet_id(),
+            ids,
+            starts,
+            bytes,
+        })
+    }
+
+    pub fn uniform(
+        first_tablet_id: TabletId,
+        tablet_count: usize,
+        total_bytes: u64,
+    ) -> Result<Self, CompactCatalogError> {
+        if tablet_count == 0 {
+            return Err(CompactCatalogError::ZeroTablets);
+        }
+        let count_u64 =
+            u64::try_from(tablet_count).map_err(|_| CompactCatalogError::SizeOverflow)?;
+        let next_tablet_id = first_tablet_id
+            .checked_add(count_u64)
+            .ok_or(CompactCatalogError::IdOverflow)?;
+
+        let mut ids = Vec::with_capacity(tablet_count);
+        let mut starts = Vec::with_capacity(tablet_count);
+        let mut bytes = Vec::with_capacity(tablet_count);
+        let base_bytes = total_bytes / count_u64;
+        let extra = total_bytes % count_u64;
+
+        for slot in 0..tablet_count {
+            let slot_u64 = slot as u64;
+            ids.push(
+                first_tablet_id
+                    .checked_add(slot_u64)
+                    .ok_or(CompactCatalogError::IdOverflow)?,
+            );
+            let start = (slot as u128).saturating_mul(HASH_SPACE_END) / tablet_count as u128;
+            starts.push(u64::try_from(start).map_err(|_| CompactCatalogError::StartOverflow)?);
+            bytes.push(base_bytes + u64::from(slot_u64 < extra));
+        }
+
+        Ok(Self {
+            generation: 0,
+            next_tablet_id,
             ids,
             starts,
             bytes,
@@ -201,6 +245,21 @@ mod tests {
 
         assert_eq!(catalog.end(last), Some(HASH_SPACE_END));
         assert_eq!(catalog.route_slot(u64::MAX), Some(last));
+    }
+
+    #[test]
+    fn uniform_catalog_preserves_full_hash_space_and_bytes() {
+        let catalog = CompactTabletCatalog::uniform(50_000, 1_000, 123_457).unwrap();
+
+        assert_eq!(catalog.tablet_count(), 1_000);
+        assert_eq!(catalog.tablet_id(0), Some(50_000));
+        assert_eq!(catalog.tablet_id(999), Some(50_999));
+        assert_eq!(catalog.next_tablet_id(), 51_000);
+        assert_eq!(catalog.start(0), Some(0));
+        assert_eq!(catalog.end(999), Some(HASH_SPACE_END));
+        assert_eq!(catalog.total_bytes(), 123_457);
+        assert_eq!(catalog.logical_bytes(), 24_000);
+        assert!(catalog.route_slot(u64::MAX).is_some());
     }
 
     #[test]

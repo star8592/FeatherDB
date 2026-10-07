@@ -815,7 +815,7 @@ fn decrement_node(counts: &mut BTreeMap<NodeId, usize>, node_id: NodeId) {
     }
 }
 
-fn owner_can_stream(cluster: &Cluster, node_id: NodeId) -> bool {
+pub(crate) fn owner_can_stream(cluster: &Cluster, node_id: NodeId) -> bool {
     cluster
         .nodes
         .get(&node_id)

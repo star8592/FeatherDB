@@ -145,6 +145,28 @@ impl CompactPlacement {
         self.replica_count.saturating_mul(size_of::<NodeId>())
     }
 
+    pub(crate) fn set_replicas_by_slot(
+        &mut self,
+        slot: usize,
+        replicas: &[NodeId],
+    ) -> Result<(), CompactPlacementError> {
+        if replicas.len() != self.replica_count || slot >= self.tablet_count as usize {
+            return Err(CompactPlacementError::ReplicaCountMismatch);
+        }
+        if replicas.windows(2).any(|pair| pair[0] >= pair[1]) {
+            return Err(CompactPlacementError::ShapeMismatch);
+        }
+
+        let start = slot
+            .checked_mul(self.replica_count)
+            .ok_or(CompactPlacementError::SizeOverflow)?;
+        let end = start
+            .checked_add(self.replica_count)
+            .ok_or(CompactPlacementError::SizeOverflow)?;
+        self.replicas[start..end].copy_from_slice(replicas);
+        Ok(())
+    }
+
     pub fn replica_counts(&self) -> BTreeMap<NodeId, usize> {
         let mut counts = BTreeMap::new();
         for node_id in &self.replicas {

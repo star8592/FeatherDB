@@ -269,3 +269,14 @@ The current evidence supports:
 4. full task objects only for bounded active/in-flight operations.
 
 This is now the preferred research direction for low-memory FeatherDB metadata.
+
+
+## Bounded active execution follow-up
+
+The lazy-move result has now been extended into CompactWindowScheduler. Future movement remains implicit in compact actual/desired maps, while only a bounded tablet window is converted into the existing full MigrationScheduler.
+
+This preserves the correctness-first migration/repair state machine instead of introducing a second compact execution protocol.
+
+In the 1M stable-ID RF2 experiment, a 1024-tablet materialization window limited full MigrationTask structs to ~90 KB while the complete 847,811-move transition converged.
+
+See docs/architecture/BOUNDED-MIGRATION-WINDOW-v0.md.
