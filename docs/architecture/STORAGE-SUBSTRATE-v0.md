@@ -98,3 +98,26 @@ Verified in the production crate:
 - `std::io::ErrorKind::StorageFull` is preserved as `DiskError::Full` through both top-level Fjall I/O errors and nested LSM I/O errors.
 
 The experiment crate remains as an external crash/recovery harness, while correctness responsibility for the adapter now lives in the production crate.
+
+
+## Durable writer admission policy
+
+The concurrent-writer/compaction-tail experiment shows that fsync-class concurrency must be device-aware. On the rotational ext4 test device, four concurrent SyncAll writers made both total foreground time and p99 latency worse; on NVMe, bounded concurrency improved total wall time but still raised per-batch p99.
+
+Therefore the V0 storage policy is:
+
+    control plane:
+        one serialized durable writer
+
+    data plane:
+        bounded admission
+        -> batch/group commit
+        -> explicit durable boundary
+
+Slow/rotational storage defaults to one durable commit in flight. Fast NVMe may permit a small bounded value only after measured latency shows it is beneficial.
+
+The admission controller must eventually expose queue-byte, queue-operation, group-delay and concurrent-durable-commit limits. It must not infer capability solely from a device model string.
+
+A 16 MiB memtable reduced RSS substantially in a one-keyspace stress workload but increased compaction count and tail latency. This is a profile trade-off, not a universal default.
+
+See docs/experiments/2026-10-08-fjall-concurrency-tail.md.

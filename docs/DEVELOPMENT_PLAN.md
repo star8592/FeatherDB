@@ -330,6 +330,10 @@ Fault tests:
 
 Rust 1.99 / Edition 2024 is now the repository-wide toolchain baseline. The root rust-toolchain.toml pins 1.99.0 with rustfmt and clippy, and package manifests declare rust-version = 1.99. This intentionally ends the earlier 1.85/1.90 compatibility target so current Fjall/redb releases can be evaluated and integrated without hidden compiler-version exceptions. GitHub CI enforces the same 1.99.0 compiler plus fmt/clippy/test and storage-benchmark compile gates. Cargo resolver 3 is enabled. rust-analyzer 1.99.0 and rust-src are part of the pinned toolchain. CI uses actions/checkout 7.0.1 and gitleaks-action 3.0.0, and Dependabot checks Cargo workspaces plus GitHub Actions daily.
 
+### Fjall writer-admission policy
+
+Fjall concurrent-writer/compaction-tail tests are now complete on both rotational ext4 storage and NVMe. HDD four-writer SyncAll worsened p99 from ~432 ms to ~2.37 s and total wall time, while NVMe four-writer improved aggregate wall time but raised per-batch p99 from ~3.3 ms to ~12.3 ms. V0 therefore keeps serialized control-plane durability and requires bounded, device-aware group commit for the future data plane. See docs/experiments/2026-10-08-fjall-concurrency-tail.md.
+
 ### Real Fjall durability adapter
 
 Fjall real DurableStore adapter now passes seven protocol/recovery tests plus an external kill -9 crash probe on ext4: unsynced staged data disappears after process death, while SyncAll data survives. CI and Dependabot now cover the standalone experiment workspace. See docs/experiments/2026-10-08-fjall-durable-adapter.md.
@@ -349,7 +353,7 @@ Current hypothesis is single-engine Fjall V0 rather than redb-control + Fjall-da
 
 See docs/architecture/STORAGE-SUBSTRATE-v0.md and docs/experiments/2026-10-07-storage-backend-bench.md.
 
-Next priority: run concurrent-writer/compaction-tail tests for the production Fjall candidate, then QUIC transport substrate benchmark.
+Next priority: QUIC transport substrate benchmark and bounded production transport adapter; then wire leaderless data messages over production storage/transport interfaces.
 
 ### Placement planner hypothesis
 
