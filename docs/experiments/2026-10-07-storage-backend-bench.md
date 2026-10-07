@@ -9,7 +9,7 @@ Candidates:
 - Fjall 3.1.12, Database + SyncAll durability
 - redb 4.3.0, write transactions + Immediate durability
 
-Both current releases declare Rust 1.90 MSRV. The FeatherDB core workspace remains Rust 1.85 during this experiment; the benchmark is an isolated standalone crate with Rust 1.90.
+At the time this benchmark was first created, both candidate releases required Rust 1.90 while the FeatherDB core still declared Rust 1.85, so the benchmark used an isolated Rust 1.90 manifest. On 2026-10-08 the repository baseline was intentionally upgraded to Rust 1.99.0 / Edition 2024.
 
 ## Fairness rules
 
@@ -131,14 +131,7 @@ This is not frozen yet. Before selection, Fjall must run the real PREPARED/CURRE
 
 ## MSRV decision
 
-Fjall 3.1.12 and redb 4.3.0 both require Rust 1.90. FeatherDB currently declares Rust 1.85.
-
-Do not silently raise the core MSRV during benchmarking. If current Fjall is selected, an explicit ADR must either:
-
-- raise the production build MSRV to 1.90; or
-- deliberately pin an older compatible engine version with separate correctness/performance evidence.
-
-Fjall 2.11.1 is an example older release that declares Rust 1.76, but it is not selected merely for compiler compatibility.
+Fjall 3.1.12 and redb 4.3.0 both require at least Rust 1.90. The repository baseline has now been explicitly raised to Rust 1.99.0, so current engine versions no longer require a separate compiler exception. Older engine releases are not selected merely for compiler compatibility.
 
 ## Scope caveats
 

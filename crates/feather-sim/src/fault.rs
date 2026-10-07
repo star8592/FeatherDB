@@ -445,7 +445,7 @@ impl FaultTrace {
             match rng.next_u64() % 5 {
                 0 => {
                     let duration = 1 + rng.next_u64() % max_duration_ticks;
-                    let bidirectional = rng.next_u64() % 2 == 0;
+                    let bidirectional = rng.next_u64().is_multiple_of(2);
                     events.push(FaultEvent {
                         tick,
                         sequence,

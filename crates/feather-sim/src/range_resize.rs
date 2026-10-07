@@ -234,14 +234,14 @@ impl RangeTabletMap {
     ) -> Result<RangeResizePlan, RangeResizeError> {
         self.validate()?;
 
-        if self.tablets.len() % 2 != 0 {
+        if !self.tablets.len().is_multiple_of(2) {
             return Err(RangeResizeError::OddTabletCount);
         }
 
         let mut target = Vec::with_capacity(self.tablets.len() / 2);
         let mut next_id = self.next_tablet_id;
 
-        for pair in self.tablets.chunks_exact(2) {
+        for pair in self.tablets.as_chunks::<2>().0 {
             let left = &pair[0];
             let right = &pair[1];
 
@@ -295,8 +295,10 @@ impl RangeTabletMap {
                 }
 
                 let mut expected_id = self.next_tablet_id;
-                for (parent, children) in
-                    self.tablets.iter().zip(plan.target_tablets.chunks_exact(2))
+                for (parent, children) in self
+                    .tablets
+                    .iter()
+                    .zip(plan.target_tablets.as_chunks::<2>().0)
                 {
                     let width = parent.end - parent.start;
                     if width < 2 {
@@ -333,8 +335,8 @@ impl RangeTabletMap {
                 }
             }
             RangeResizeKind::MergePairs => {
-                if self.tablets.len() % 2 != 0
-                    || plan.from_count % 2 != 0
+                if !self.tablets.len().is_multiple_of(2)
+                    || !plan.from_count.is_multiple_of(2)
                     || plan.to_count != plan.from_count / 2
                     || plan.target_tablets.len() != self.tablets.len() / 2
                 {
@@ -342,7 +344,13 @@ impl RangeTabletMap {
                 }
 
                 let mut expected_id = self.next_tablet_id;
-                for (parents, merged) in self.tablets.chunks_exact(2).zip(&plan.target_tablets) {
+                for (parents, merged) in self
+                    .tablets
+                    .as_chunks::<2>()
+                    .0
+                    .iter()
+                    .zip(&plan.target_tablets)
+                {
                     let left = &parents[0];
                     let right = &parents[1];
                     if left.end != right.start || left.replicas != right.replicas {

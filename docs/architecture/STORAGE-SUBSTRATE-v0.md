@@ -34,7 +34,7 @@ Risks:
 - memory depends materially on cache, memtables, keyspace count and compaction behavior;
 - default 64 MiB per-keyspace memtable is not automatically compatible with FeatherDB's smallest-node goals;
 - naive 8 MiB memtable tuning performed worse in the first experiment;
-- current 3.1.12 release requires Rust 1.90 while FeatherDB core currently declares 1.85.
+- current 3.1.12 release requires Rust 1.90; FeatherDB now targets Rust 1.99, so this is no longer a compatibility blocker.
 
 ## Candidate B: redb
 
@@ -51,7 +51,7 @@ Risks for the main data plane:
 - only one write transaction may be in progress at a time;
 - rotational-disk durable streaming batches were substantially slower in the first benchmark;
 - larger file footprint in that workload;
-- current 4.3.0 release also requires Rust 1.90.
+- current 4.3.0 release requires Rust 1.90; FeatherDB Rust 1.99 satisfies this requirement.
 
 ## One engine vs two engines
 
@@ -71,6 +71,11 @@ Do not freeze this until:
 2. forced-process crash/reopen verifies unsynced vs synced behavior;
 3. concurrent writer and compaction-tail tests are run;
 4. memory is measured under a production-like keyspace layout rather than synthetic two-keyspace defaults;
-5. the Rust 1.90 MSRV decision is explicit.
+5. the repository remains validated on the pinned Rust 1.99 toolchain.
 
 redb stays in the benchmark matrix and remains a plausible fallback if the data-plane concurrency assumption changes.
+
+
+## Rust baseline
+
+FeatherDB now standardizes on Rust 1.99.0 and Edition 2024. The root toolchain file pins compiler, rustfmt and clippy so local development and CI can reproduce the same compiler surface. This supersedes the earlier Rust 1.85 core / Rust 1.90 experiment split.

@@ -471,11 +471,11 @@ impl MigrationScheduler {
             self.tasks[index].in_flight_bytes = 0;
             self.tasks[index].in_flight_offset = 0;
 
-            if let Some(next_source) = next_source {
-                if next_source != current_source {
-                    self.tasks[index].copy_source = next_source;
-                    report.source_failovers += 1;
-                }
+            if let Some(next_source) = next_source
+                && next_source != current_source
+            {
+                self.tasks[index].copy_source = next_source;
+                report.source_failovers += 1;
             }
         }
     }

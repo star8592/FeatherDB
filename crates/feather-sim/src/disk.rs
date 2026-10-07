@@ -199,11 +199,11 @@ impl SimDisk {
         };
 
         let mut completion = self.core.execute(request);
-        if self.corrupt_next_read > 0 {
-            if let DiskCompletion::Read(Some(value)) = &mut completion {
-                self.corrupt_next_read -= 1;
-                corrupt_bytes(value);
-            }
+        if self.corrupt_next_read > 0
+            && let DiskCompletion::Read(Some(value)) = &mut completion
+        {
+            self.corrupt_next_read -= 1;
+            corrupt_bytes(value);
         }
         DiskSubmit::Completed(completion)
     }
