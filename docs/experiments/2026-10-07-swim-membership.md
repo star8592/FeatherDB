@@ -139,3 +139,49 @@ The experiment therefore caught a substantial hidden efficiency bug that ordinar
 The shared deterministic message bus is now exercised by a real decentralized failure detector rather than only synthetic message schedules.
 
 The next protocol work should add dynamic membership bootstrap/join/leave and then subject that path to repeated churn.
+
+## Dynamic join/leave/rejoin follow-up
+
+A second deterministic campaign starts with only 20 nodes and grows the live membership set dynamically.
+
+Sequence:
+
+    20 initial nodes
+    +80 joining nodes
+      - every 10th joiner's seed link temporarily partitioned
+    => 100 joined
+
+    20 graceful leaves
+    => 80 joined / 20 Left
+
+    10 explicit rejoins
+      - selected seed links temporarily partitioned
+    => 90 joined / 10 Left
+
+Release result:
+
+    join convergence tick = 215
+    leave convergence tick = 216
+    rejoin convergence tick = 315
+
+Protocol counters:
+
+    JoinReq = 200
+    JoinResp accepted = 90
+    graceful Leave operations = 20
+    peak buffered messages = 100
+    backpressure = 0
+
+Final deterministic digest:
+
+    14974812575840271653
+
+Release peak RSS:
+
+    ~4,464 KB
+
+The campaign is executed twice and returns the same counters, convergence ticks and final digest.
+
+A separate targeted test keeps a new node partitioned from its seed for 100 ticks, long enough to exceed the ordinary gossip retransmit budget. Join still succeeds after heal because JoinReq always carries the node's current self Alive/incarnation explicitly rather than depending on queued piggyback state.
+
+`Left` is terminal at the same incarnation; explicit rejoin increments incarnation and therefore safely supersedes the old Left record.

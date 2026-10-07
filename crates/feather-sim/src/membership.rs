@@ -15,6 +15,7 @@ pub enum MemberStatus {
     Alive = 0,
     Suspect = 1,
     Dead = 2,
+    Left = 3,
 }
 
 impl MemberStatus {
@@ -23,6 +24,7 @@ impl MemberStatus {
             0 => Some(Self::Alive),
             1 => Some(Self::Suspect),
             2 => Some(Self::Dead),
+            3 => Some(Self::Left),
             _ => None,
         }
     }
@@ -150,6 +152,9 @@ enum WireKind {
     Ping = 1,
     Ack = 2,
     PingReq = 3,
+    JoinReq = 4,
+    JoinResp = 5,
+    Leave = 6,
 }
 
 impl WireKind {
@@ -158,6 +163,9 @@ impl WireKind {
             1 => Some(Self::Ping),
             2 => Some(Self::Ack),
             3 => Some(Self::PingReq),
+            4 => Some(Self::JoinReq),
+            5 => Some(Self::JoinResp),
+            6 => Some(Self::Leave),
             _ => None,
         }
     }
@@ -182,6 +190,9 @@ pub struct MembershipStats {
     pub updates_applied: u64,
     pub malformed_messages: u64,
     pub backpressured_messages: u64,
+    pub join_requests_sent: u64,
+    pub join_responses_received: u64,
+    pub graceful_leaves_sent: u64,
 }
 
 #[derive(Clone, Debug)]
@@ -196,6 +207,9 @@ pub struct SwimNode {
     next_probe_sequence: u64,
     next_probe_at: u64,
     awareness_score: u8,
+    joined: bool,
+    join_seed: Option<NodeId>,
+    next_join_retry_at: u64,
     stats: MembershipStats,
 }
 
@@ -225,8 +239,28 @@ impl SwimNode {
             next_probe_sequence: 1,
             next_probe_at: 0,
             awareness_score: 0,
+            joined: true,
+            join_seed: None,
+            next_join_retry_at: 0,
             stats: MembershipStats::default(),
         })
+    }
+
+    pub fn new_joining(
+        id: NodeId,
+        seed: NodeId,
+        config: MembershipConfig,
+    ) -> Result<Self, MembershipConfigError> {
+        let mut node = Self::new(id, &[id, seed], config)?;
+        node.joined = false;
+        node.join_seed = Some(seed);
+        node.next_join_retry_at = 0;
+        node.queue_update(MemberUpdate {
+            node_id: id,
+            incarnation: 0,
+            status: MemberStatus::Alive,
+        });
+        Ok(node)
     }
 
     pub fn id(&self) -> NodeId {
@@ -249,6 +283,10 @@ impl SwimNode {
         self.stats
     }
 
+    pub fn is_joined(&self) -> bool {
+        self.joined
+    }
+
     pub fn pending_probe_target(&self) -> Option<NodeId> {
         self.pending_probe.map(|probe| probe.target)
     }
@@ -260,6 +298,14 @@ impl SwimNode {
     pub fn tick(&mut self, now_tick: u64, network: &mut SimNetwork) {
         self.expire_relays(now_tick);
         self.expire_suspicions(now_tick);
+
+        if !self.joined {
+            if now_tick >= self.next_join_retry_at {
+                self.send_join_request(now_tick, network);
+            }
+            return;
+        }
+
         self.advance_pending_probe(now_tick, network);
 
         if self.pending_probe.is_none() && now_tick >= self.next_probe_at {
@@ -296,7 +342,89 @@ impl SwimNode {
             }
             WireKind::Ack => self.handle_ack(now_tick, message.from, wire, network),
             WireKind::PingReq => self.handle_ping_req(now_tick, wire, network),
+            WireKind::JoinReq => {
+                if wire.probe.origin == message.from {
+                    self.send_join_response(now_tick, message.from, network);
+                }
+            }
+            WireKind::JoinResp => {
+                if wire.target == self.id {
+                    self.joined = true;
+                    self.join_seed = None;
+                    self.next_probe_at = now_tick;
+                    self.stats.join_responses_received =
+                        self.stats.join_responses_received.saturating_add(1);
+                }
+            }
+            WireKind::Leave => {}
         }
+    }
+
+    pub fn graceful_leave(&mut self, now_tick: u64, network: &mut SimNetwork) -> bool {
+        let Some(current) = self.members.get(&self.id).copied() else {
+            return false;
+        };
+        if current.status == MemberStatus::Left {
+            return false;
+        }
+
+        let update = MemberUpdate {
+            node_id: self.id,
+            incarnation: current.incarnation,
+            status: MemberStatus::Left,
+        };
+        self.members.insert(
+            self.id,
+            MemberState {
+                incarnation: update.incarnation,
+                status: MemberStatus::Left,
+            },
+        );
+        self.pending_probe = None;
+        self.relays.clear();
+        self.suspicions.remove(&self.id);
+
+        let peers: Vec<_> = self
+            .members
+            .iter()
+            .filter(|(node_id, state)| {
+                **node_id != self.id
+                    && !matches!(state.status, MemberStatus::Dead | MemberStatus::Left)
+            })
+            .map(|(node_id, _)| *node_id)
+            .collect();
+
+        let probe = ProbeId {
+            origin: self.id,
+            sequence: 0,
+        };
+        for peer in peers {
+            self.send_wire_message(
+                now_tick,
+                peer,
+                WireMessage {
+                    kind: WireKind::Leave,
+                    probe,
+                    target: self.id,
+                    updates: vec![update],
+                },
+                false,
+                network,
+            );
+        }
+
+        self.joined = false;
+        self.join_seed = None;
+        self.stats.graceful_leaves_sent = self.stats.graceful_leaves_sent.saturating_add(1);
+        true
+    }
+
+    pub fn begin_join(&mut self, now_tick: u64, seed: NodeId, network: &mut SimNetwork) {
+        self.restart(now_tick);
+        self.joined = false;
+        self.join_seed = Some(seed);
+        self.next_join_retry_at = now_tick;
+        self.send_join_request(now_tick, network);
     }
 
     pub fn restart(&mut self, now_tick: u64) {
@@ -316,6 +444,9 @@ impl SwimNode {
         self.relays.clear();
         self.suspicions.remove(&self.id);
         self.awareness_score = 0;
+        self.joined = true;
+        self.join_seed = None;
+        self.next_join_retry_at = 0;
         self.next_probe_at = now_tick;
         self.queue_update(MemberUpdate {
             node_id: self.id,
@@ -562,7 +693,7 @@ impl SwimNode {
                     },
                 );
             }
-            MemberStatus::Dead => {
+            MemberStatus::Dead | MemberStatus::Left => {
                 self.suspicions.remove(&update.node_id);
                 if self
                     .pending_probe
@@ -584,6 +715,10 @@ impl SwimNode {
             incarnation: 0,
             status: MemberStatus::Alive,
         });
+
+        if current.status == MemberStatus::Left && !self.joined {
+            return false;
+        }
 
         let challenges_self = update.incarnation > current.incarnation
             || (update.incarnation == current.incarnation && update.status != MemberStatus::Alive);
@@ -617,7 +752,10 @@ impl SwimNode {
         let candidates: Vec<_> = self
             .members
             .iter()
-            .filter(|(node_id, state)| **node_id != self.id && state.status != MemberStatus::Dead)
+            .filter(|(node_id, state)| {
+                **node_id != self.id
+                    && !matches!(state.status, MemberStatus::Dead | MemberStatus::Left)
+            })
             .map(|(node_id, _)| *node_id)
             .collect();
         if candidates.is_empty() {
@@ -648,6 +786,89 @@ impl SwimNode {
         candidates
     }
 
+    fn send_join_request(&mut self, now_tick: u64, network: &mut SimNetwork) {
+        let Some(seed) = self.join_seed else {
+            return;
+        };
+        let self_state = self.members.get(&self.id).copied().unwrap_or(MemberState {
+            incarnation: 0,
+            status: MemberStatus::Alive,
+        });
+        self.send_wire_message(
+            now_tick,
+            seed,
+            WireMessage {
+                kind: WireKind::JoinReq,
+                probe: ProbeId {
+                    origin: self.id,
+                    sequence: 0,
+                },
+                target: seed,
+                updates: vec![MemberUpdate {
+                    node_id: self.id,
+                    incarnation: self_state.incarnation,
+                    status: MemberStatus::Alive,
+                }],
+            },
+            false,
+            network,
+        );
+        self.next_join_retry_at = now_tick.saturating_add(
+            self.scaled_timeout(self.config.direct_timeout_ticks.saturating_mul(2)),
+        );
+        self.stats.join_requests_sent = self.stats.join_requests_sent.saturating_add(1);
+    }
+
+    fn send_join_response(
+        &mut self,
+        now_tick: u64,
+        joining_node: NodeId,
+        network: &mut SimNetwork,
+    ) {
+        let updates = self
+            .members
+            .iter()
+            .map(|(node_id, state)| MemberUpdate {
+                node_id: *node_id,
+                incarnation: state.incarnation,
+                status: state.status,
+            })
+            .collect();
+        self.send_wire_message(
+            now_tick,
+            joining_node,
+            WireMessage {
+                kind: WireKind::JoinResp,
+                probe: ProbeId {
+                    origin: joining_node,
+                    sequence: 0,
+                },
+                target: joining_node,
+                updates,
+            },
+            false,
+            network,
+        );
+    }
+
+    fn send_wire_message(
+        &mut self,
+        now_tick: u64,
+        to: NodeId,
+        wire: WireMessage,
+        mark_piggyback_attempts: bool,
+        network: &mut SimNetwork,
+    ) -> MessageSend {
+        let payload = encode_wire(&wire);
+        let result = network.send_message(now_tick, self.id, to, MessageClass::Membership, payload);
+        if matches!(result, MessageSend::Backpressure { .. }) {
+            self.stats.backpressured_messages = self.stats.backpressured_messages.saturating_add(1);
+        } else if mark_piggyback_attempts {
+            self.mark_update_attempts();
+        }
+        result
+    }
+
     fn send_wire(
         &mut self,
         now_tick: u64,
@@ -657,20 +878,18 @@ impl SwimNode {
         target: NodeId,
         network: &mut SimNetwork,
     ) -> MessageSend {
-        let updates = self.peek_updates();
-        let payload = encode_wire(&WireMessage {
-            kind,
-            probe,
-            target,
-            updates,
-        });
-        let result = network.send_message(now_tick, self.id, to, MessageClass::Membership, payload);
-        if matches!(result, MessageSend::Backpressure { .. }) {
-            self.stats.backpressured_messages = self.stats.backpressured_messages.saturating_add(1);
-        } else {
-            self.mark_update_attempts();
-        }
-        result
+        self.send_wire_message(
+            now_tick,
+            to,
+            WireMessage {
+                kind,
+                probe,
+                target,
+                updates: self.peek_updates(),
+            },
+            true,
+            network,
+        )
     }
 
     fn queue_update(&mut self, update: MemberUpdate) {
@@ -751,6 +970,45 @@ impl MembershipCluster {
         &mut self.network
     }
 
+    pub fn add_joining_node(&mut self, node_id: NodeId, seed: NodeId) -> bool {
+        if self.nodes.contains_key(&node_id) || self.crashed.contains(&seed) {
+            return false;
+        }
+        let Some(config) = self.nodes.get(&seed).map(|node| node.config) else {
+            return false;
+        };
+        let Ok(node) = SwimNode::new_joining(node_id, seed, config) else {
+            return false;
+        };
+        self.nodes.insert(node_id, node);
+        true
+    }
+
+    pub fn graceful_leave(&mut self, node_id: NodeId) -> bool {
+        if self.crashed.contains(&node_id) {
+            return false;
+        }
+        let now = self.clock.now();
+        let Some(node) = self.nodes.get_mut(&node_id) else {
+            return false;
+        };
+        node.graceful_leave(now, &mut self.network)
+    }
+
+    pub fn rejoin(&mut self, node_id: NodeId, seed: NodeId) -> bool {
+        if self.crashed.contains(&node_id)
+            || !self.nodes.contains_key(&seed)
+            || self.crashed.contains(&seed)
+        {
+            return false;
+        }
+        let Some(node) = self.nodes.get_mut(&node_id) else {
+            return false;
+        };
+        node.begin_join(self.clock.now(), seed, &mut self.network);
+        true
+    }
+
     pub fn crash(&mut self, node_id: NodeId) -> bool {
         if !self.nodes.contains_key(&node_id) {
             return false;
@@ -816,11 +1074,23 @@ impl MembershipCluster {
     pub fn all_live_observers_see(&self, subject: NodeId, status: MemberStatus) -> bool {
         self.nodes.iter().all(|(observer, node)| {
             self.crashed.contains(observer)
+                || !node.is_joined()
                 || *observer == subject
                 || node
                     .member(subject)
                     .is_some_and(|state| state.status == status)
         })
+    }
+
+    pub fn joined_node_count(&self) -> usize {
+        self.nodes
+            .iter()
+            .filter(|(node_id, node)| !self.crashed.contains(node_id) && node.is_joined())
+            .count()
+    }
+
+    pub fn buffered_message_count(&self) -> usize {
+        self.network.buffered_message_count()
     }
 }
 
@@ -964,6 +1234,229 @@ mod tests {
             ],
         };
         assert_eq!(decode_wire(&encode_wire(&message)), Some(message));
+    }
+
+    #[test]
+    fn wire_round_trip_preserves_join_leave_kinds_and_left_status() {
+        for kind in [WireKind::JoinReq, WireKind::JoinResp, WireKind::Leave] {
+            let message = WireMessage {
+                kind,
+                probe: ProbeId {
+                    origin: 9,
+                    sequence: 1,
+                },
+                target: 9,
+                updates: vec![MemberUpdate {
+                    node_id: 9,
+                    incarnation: 4,
+                    status: MemberStatus::Left,
+                }],
+            };
+            assert_eq!(decode_wire(&encode_wire(&message)), Some(message));
+        }
+    }
+
+    #[test]
+    fn joining_node_bootstraps_from_seed_and_converges() {
+        let mut cluster = cluster(3);
+        assert!(cluster.add_joining_node(4, 1));
+        assert!(!cluster.node(4).unwrap().is_joined());
+
+        cluster.run_ticks(40);
+
+        assert!(cluster.node(4).unwrap().is_joined());
+        for observer in 1..=4 {
+            assert_eq!(
+                cluster.view(observer, 4),
+                Some(MemberState {
+                    incarnation: 0,
+                    status: MemberStatus::Alive,
+                })
+            );
+        }
+        for subject in 1..=4 {
+            assert_eq!(
+                cluster.view(4, subject).map(|state| state.status),
+                Some(MemberStatus::Alive)
+            );
+        }
+        assert!(cluster.node(4).unwrap().stats().join_requests_sent >= 1);
+        assert!(cluster.node(4).unwrap().stats().join_responses_received >= 1);
+    }
+
+    #[test]
+    fn join_retries_after_temporary_seed_partition() {
+        let mut cluster = cluster(3);
+        assert!(cluster.add_joining_node(4, 1));
+        cluster.network_mut().partition(4, 1, true);
+
+        cluster.run_ticks(12);
+        assert!(!cluster.node(4).unwrap().is_joined());
+        assert!(cluster.node(4).unwrap().stats().join_requests_sent >= 2);
+
+        cluster.network_mut().heal(4, 1, true);
+        cluster.run_ticks(40);
+
+        assert!(cluster.node(4).unwrap().is_joined());
+        assert!(cluster.all_live_observers_see(4, MemberStatus::Alive));
+    }
+
+    #[test]
+    fn join_survives_partition_longer_than_gossip_retransmit_budget() {
+        let mut cluster = cluster(3);
+        assert!(cluster.add_joining_node(4, 1));
+        cluster.network_mut().partition(4, 1, true);
+
+        cluster.run_ticks(100);
+        assert!(!cluster.node(4).unwrap().is_joined());
+        assert!(
+            cluster.node(4).unwrap().stats().join_requests_sent
+                > u64::from(config().update_retransmits)
+        );
+
+        cluster.network_mut().heal(4, 1, true);
+        cluster.run_ticks(80);
+
+        assert!(cluster.node(4).unwrap().is_joined());
+        assert!(cluster.all_live_observers_see(4, MemberStatus::Alive));
+    }
+
+    #[test]
+    fn graceful_leave_converges_to_left_and_does_not_get_probed() {
+        let mut cluster = cluster(5);
+        cluster.run_ticks(10);
+        assert!(cluster.graceful_leave(5));
+
+        cluster.run_ticks(30);
+
+        assert!(cluster.all_live_observers_see(5, MemberStatus::Left));
+        assert!(!cluster.node(5).unwrap().is_joined());
+        assert_eq!(
+            cluster.view(5, 5),
+            Some(MemberState {
+                incarnation: 0,
+                status: MemberStatus::Left,
+            })
+        );
+        assert!(cluster.node(5).unwrap().stats().graceful_leaves_sent >= 1);
+        for observer in 1..5 {
+            assert_ne!(
+                cluster.node(observer).unwrap().pending_probe_target(),
+                Some(5)
+            );
+        }
+    }
+
+    #[test]
+    fn same_incarnation_alive_cannot_resurrect_left_member() {
+        let mut node = SwimNode::new(1, &[1, 2], config()).unwrap();
+        assert!(node.apply_update(
+            0,
+            MemberUpdate {
+                node_id: 2,
+                incarnation: 7,
+                status: MemberStatus::Left,
+            }
+        ));
+        assert!(!node.apply_update(
+            1,
+            MemberUpdate {
+                node_id: 2,
+                incarnation: 7,
+                status: MemberStatus::Alive,
+            }
+        ));
+        assert_eq!(
+            node.member(2),
+            Some(MemberState {
+                incarnation: 7,
+                status: MemberStatus::Left,
+            })
+        );
+    }
+
+    #[test]
+    fn hundred_node_join_leave_rejoin_churn_converges() {
+        let mut cluster = cluster(20);
+
+        for node_id in 21..=100 {
+            let seed = 1 + (node_id % 20);
+            assert!(cluster.add_joining_node(node_id, seed));
+            if node_id % 10 == 0 {
+                cluster.network_mut().partition(node_id, seed, true);
+            }
+        }
+
+        cluster.run_ticks(40);
+        for node_id in (30..=100).step_by(10) {
+            let seed = 1 + (node_id % 20);
+            cluster.network_mut().heal(node_id, seed, true);
+        }
+        cluster.run_ticks(240);
+
+        assert_eq!(cluster.joined_node_count(), 100);
+        for subject in 1..=100 {
+            assert!(cluster.all_live_observers_see(subject, MemberStatus::Alive));
+        }
+
+        for node_id in 41..=60 {
+            assert!(cluster.graceful_leave(node_id));
+        }
+        cluster.run_ticks(120);
+
+        assert_eq!(cluster.joined_node_count(), 80);
+        for subject in 41..=60 {
+            assert!(cluster.all_live_observers_see(subject, MemberStatus::Left));
+        }
+
+        for node_id in 41..=50 {
+            let seed = 1 + (node_id % 20);
+            assert!(cluster.rejoin(node_id, seed));
+            if node_id % 3 == 0 {
+                cluster.network_mut().partition(node_id, seed, true);
+            }
+        }
+        cluster.run_ticks(40);
+        for node_id in 41..=50 {
+            let seed = 1 + (node_id % 20);
+            cluster.network_mut().heal(node_id, seed, true);
+        }
+        cluster.run_ticks(240);
+
+        assert_eq!(cluster.joined_node_count(), 90);
+        for subject in 1..=40 {
+            assert!(cluster.all_live_observers_see(subject, MemberStatus::Alive));
+        }
+        for subject in 41..=50 {
+            assert!(cluster.all_live_observers_see(subject, MemberStatus::Alive));
+            assert!(cluster.view(1, subject).unwrap().incarnation >= 1);
+        }
+        for subject in 51..=60 {
+            assert!(cluster.all_live_observers_see(subject, MemberStatus::Left));
+        }
+        for subject in 61..=100 {
+            assert!(cluster.all_live_observers_see(subject, MemberStatus::Alive));
+        }
+
+        cluster.run_ticks(20);
+        assert!(cluster.buffered_message_count() < 10_000);
+    }
+
+    #[test]
+    fn graceful_left_node_rejoins_with_higher_incarnation() {
+        let mut cluster = cluster(4);
+        cluster.run_ticks(8);
+        assert!(cluster.graceful_leave(4));
+        cluster.run_ticks(20);
+        let left_incarnation = cluster.view(1, 4).unwrap().incarnation;
+        assert_eq!(cluster.view(1, 4).unwrap().status, MemberStatus::Left);
+
+        assert!(cluster.rejoin(4, 1));
+        cluster.run_ticks(50);
+
+        assert!(cluster.node(4).unwrap().is_joined());
+        assert!(cluster.all_live_observers_see(4, MemberStatus::Alive));
+        assert!(cluster.view(1, 4).unwrap().incarnation > left_incarnation);
     }
 
     #[test]

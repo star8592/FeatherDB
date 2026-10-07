@@ -371,3 +371,124 @@ These are deliberately explicit rather than hidden behind a “SWIM complete” 
 The highest-value next membership step is dynamic join/leave/bootstrap on the same message bus, followed by faulted churn campaigns.
 
 Only after membership behavior is credible should failure evidence drive automatic durable topology replacement/removal.
+
+## Dynamic join / graceful leave lifecycle
+
+Membership now models nodes entering and leaving an already-running cluster rather than assuming the full node set exists at construction time.
+
+### Join bootstrap
+
+A joining node is created with only:
+
+    self NodeId
+    seed NodeId
+    current self incarnation
+
+It does not participate in normal SWIM probing until bootstrap succeeds.
+
+It periodically sends:
+
+    JoinReq(self -> seed)
+
+Every JoinReq explicitly carries the joining node's current Alive/incarnation record. This is intentionally independent of the ordinary bounded gossip retransmit queue.
+
+That distinction matters under a long seed partition: a joining node can retry for longer than `update_retransmits` without exhausting the only copy of its self-announcement.
+
+The seed applies the self update and returns:
+
+    JoinResp(seed -> joining node)
+
+containing its current membership view. The joining node imports those updates, marks bootstrap complete, and begins normal SWIM probing/dissemination.
+
+Tests verify both ordinary bootstrap and a partition lasting longer than the normal gossip retransmit budget.
+
+### Graceful leave
+
+`Left` is now a distinct membership status:
+
+    Alive < Suspect < Dead < Left
+
+at the same incarnation.
+
+A graceful leaver:
+
+1. records self as Left;
+2. stops normal probing;
+3. clears pending probe/relay state;
+4. sends an explicit Leave message carrying its Left update to known live peers.
+
+Remote nodes treat Left as terminal for that incarnation:
+
+- suspicion state is cleared;
+- the node is no longer selected as a probe target;
+- same-incarnation Alive cannot resurrect it.
+
+This distinguishes an intentional administrative departure from failure detection (`Dead`).
+
+### Rejoin
+
+A previously Left node may rejoin explicitly.
+
+Rejoin increments the node's incarnation before sending JoinReq, so:
+
+    Alive(new incarnation) > Left(old incarnation)
+
+without weakening the rule that stale Alive gossip cannot undo a graceful leave.
+
+### Observer semantics
+
+A node that has gracefully left, or has not yet completed bootstrap, is not treated as an active membership observer when convergence predicates are evaluated.
+
+This avoids requiring a node that intentionally stopped participating to continue receiving and reconciling the cluster view.
+
+## 100-node dynamic churn campaign
+
+A deterministic release-mode campaign now exercises actual membership lifecycle changes:
+
+    initial nodes = 20
+    dynamic joins = 80
+    final first phase = 100 joined
+
+During bootstrap, every 10th joining node has its seed link partitioned and later healed.
+
+Then:
+
+    graceful leaves = 20
+    joined after leave = 80
+
+Finally:
+
+    rejoins = 10
+    some rejoin seed links temporarily partitioned
+    final joined = 90
+    final Left = 10
+
+Observed deterministic result:
+
+    initial join convergence tick = 215
+    graceful-leave convergence tick = 216
+    rejoin convergence tick = 315
+    total JoinReq sent = 200
+    JoinResp accepted = 90
+    graceful leaves sent = 20
+    peak buffered messages = 100
+    message backpressure = 0
+    final digest = 14974812575840271653
+    release peak RSS ~= 4.46 MB
+
+The complete campaign runs twice and produces the same result.
+
+These values are simulator/build measurements, not production latency or memory claims.
+
+## Remaining membership lifecycle work
+
+The current join path still assumes the caller already knows one reachable seed identity/address. Production bootstrap discovery, authentication and endpoint exchange are later transport/security concerns.
+
+Graceful leave is advisory under a total network partition: peers that never receive a Leave may eventually classify the node Dead instead. Durable topology removal remains a control-plane decision; weakly consistent membership alone is not ownership authority.
+
+Still open:
+
+- authenticated node identity and endpoint bootstrap;
+- push/pull anti-entropy for very long gossip gaps;
+- larger repeated churn with simultaneous crash + join + leave;
+- integration from membership observations into topology-control proposals without allowing failure detector output to mutate ownership directly.

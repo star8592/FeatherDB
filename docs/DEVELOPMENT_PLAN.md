@@ -242,7 +242,10 @@ Implemented:
 - real SWIM-style membership state machine on the shared bus;
 - direct + indirect probing, Suspect/Dead, incarnation refutation, bounded piggyback dissemination;
 - Lifeguard-inspired local-health timeout scaling;
-- deterministic 100-node fault campaign with crash -> global Dead -> restart -> full 100x100 Alive convergence.
+- deterministic 100-node fault campaign with crash -> global Dead -> restart -> full 100x100 Alive convergence;
+- dynamic seed bootstrap with JoinReq retry independent of gossip retransmit budget;
+- explicit Left terminal state and higher-incarnation rejoin;
+- 20 -> 100 join, 20 leave, 10 rejoin deterministic churn campaign with bounded queues.
 
 See docs/architecture/DETERMINISTIC-FAULTS-v0.md, docs/architecture/DETERMINISTIC-MESSAGE-BUS-v0.md, docs/architecture/MEMBERSHIP-v0.md, docs/experiments/2026-10-07-deterministic-fault-replay.md, docs/experiments/2026-10-07-deterministic-network.md, docs/experiments/2026-10-07-message-bus.md, and docs/experiments/2026-10-07-swim-membership.md.
 
@@ -259,7 +262,7 @@ Seed-driven events:
 - DiskFull/slow I/O;
 - CPU stall;
 - telemetry oscillation;
-- repeated join/leave churn.
+- repeated join/leave churn (basic 100-node dynamic campaign implemented; simultaneous crash/join/leave remains open).
 
 Persist replay traces for every failure.
 
@@ -313,12 +316,12 @@ Fault tests:
 - Phase 1.3: partial; strong-node join and failure-domain-pressure scenarios implemented.
 - RF=2 single-node removal movement now matches a failure-domain-aware constrained lower bound exactly.
 - Tablet resize controller: logical count control implemented with hysteresis, cooldown, metadata budget, epoch/generation fencing, and replay idempotency.
-- Tests: 156 passing.
+- Tests: 164 passing.
 - First experiment: `docs/experiments/2026-10-06-placement-baseline.md`.
 - ADR-0001: still Proposed.
 - ADR-0002: still Proposed.
 
-Next priority: dynamic membership bootstrap/join/leave on the shared bus, deterministic disk adapter, repeated 100-node membership/topology churn, then production-substrate benchmarks.
+Next priority: deterministic disk adapter, simultaneous crash+join+leave churn tied to topology proposals, then production-substrate benchmarks.
 
 ### Placement planner hypothesis
 
