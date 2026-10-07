@@ -273,12 +273,17 @@ Exit gate:
 
 ## Phase 5 — leaderless data semantics
 
-Only after placement/topology are credible, model:
-- N/R/W quorum;
-- version model (HLC + causal metadata candidates);
-- conflict policies;
-- hinted handoff candidate;
-- anti-entropy/repair.
+Executable v0 model complete for:
+- N/R/W quorum and quorum-intersection checks;
+- HLC + version-vector causal metadata;
+- sibling-preserving concurrent-write conflicts;
+- causal overwrite/resolution;
+- versioned tombstones;
+- bounded hinted handoff;
+- key-level anti-entropy repair;
+- key-scoped causal reads.
+
+Production persistence/transport wiring and range-hash acceleration remain open. Linearizable CAS is intentionally not faked by the leaderless path and needs an explicit strong-consistency design before public exposure.
 
 Do not implement general SQL or distributed ACID transactions.
 
@@ -316,7 +321,7 @@ Fault tests:
 - Phase 1.3: partial; strong-node join and failure-domain-pressure scenarios implemented.
 - RF=2 single-node removal movement now matches a failure-domain-aware constrained lower bound exactly.
 - Tablet resize controller: logical count control implemented with hysteresis, cooldown, metadata budget, epoch/generation fencing, and replay idempotency.
-- Tests: 207 passing.
+- Core simulator tests: 217 passing; production Fjall adapter tests: 9 passing.
 - First experiment: `docs/experiments/2026-10-06-placement-baseline.md`.
 - ADR-0001: still Proposed.
 - ADR-0002: still Proposed.
@@ -329,6 +334,10 @@ Rust 1.99 / Edition 2024 is now the repository-wide toolchain baseline. The root
 
 Fjall real DurableStore adapter now passes seven protocol/recovery tests plus an external kill -9 crash probe on ext4: unsynced staged data disappears after process death, while SyncAll data survives. CI and Dependabot now cover the standalone experiment workspace. See docs/experiments/2026-10-08-fjall-durable-adapter.md.
 Production `feather-storage-fjall` now owns nine adapter/protocol tests, including PREPARED/CURRENT recovery, PREPARED GC, RuntimeCoordinator reconstruction, and StorageFull error preservation.
+
+### Leaderless data semantics
+
+Phase 5 now has an executable deterministic model for N/R/W quorum, HLC, version-vector causality, siblings, tombstones, bounded hints, anti-entropy and key-scoped causal reads. Failed quorum writes deliberately retain partial-write ambiguity, hints are explicitly best-effort, and concurrent updates are not silently destroyed by wall-clock LWW. See `docs/architecture/DATA-SEMANTICS-v0.md`.
 
 ### Production storage substrate benchmark
 

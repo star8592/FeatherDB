@@ -4,6 +4,7 @@ pub mod compact;
 pub mod compact_catalog;
 pub mod compact_migration;
 pub mod compact_window;
+pub mod data_semantics;
 pub mod disk;
 pub mod durable_runtime;
 pub mod fault;
@@ -28,6 +29,12 @@ pub use compact_catalog::{CompactCatalogError, CompactTabletCatalog};
 pub use compact_migration::{CompactMigrationCursor, CompactMigrationMove};
 pub use compact_window::{
     CompactWindowError, CompactWindowPhase, CompactWindowReconcileReport, CompactWindowScheduler,
+};
+
+pub use data_semantics::{
+    CausalRelation, ConflictPolicy, DataError, HlcClock, HlcTimestamp, LeaderlessDataCluster,
+    QuorumPolicy, QuorumPolicyError, ReadOutcome, ResolvedValue, SiblingSet, VersionVector,
+    VersionedValue, WriteOutcome, resolve_siblings,
 };
 
 pub use disk::{
