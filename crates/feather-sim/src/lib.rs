@@ -5,6 +5,7 @@ pub mod compact_catalog;
 pub mod compact_migration;
 pub mod compact_window;
 pub mod disk;
+pub mod durable_runtime;
 pub mod fault;
 mod hash;
 pub mod membership;
@@ -33,6 +34,11 @@ pub use disk::{
     ControlCommitState, ControlRecord, DirectMemoryStore, DiskCompletion, DiskError, DiskOpId,
     DiskPoll, DiskRequest, DiskSubmit, DurableControlWriter, DurableStore, SimDisk,
     read_control_record,
+};
+
+pub use durable_runtime::{
+    DurableResizeError, DurableResizeProgress, DurableResizeTransaction, RecoveredTabletRuntime,
+    recover_tablet_runtime,
 };
 
 pub use fault::{
@@ -97,4 +103,8 @@ pub use transport::{
     TransferSubmit,
 };
 
-pub use topology_snapshot::{TopologySnapshot, TopologySnapshotError};
+pub use topology_snapshot::{
+    DurableTopologyTxnWriter, PreparedTopologyTxn, TopologyRecovery, TopologySnapshot,
+    TopologySnapshotError, TopologyTxnError, TopologyTxnState, read_current_topology,
+    read_prepared_topology, recover_topology,
+};

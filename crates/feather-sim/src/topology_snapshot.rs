@@ -518,6 +518,19 @@ impl DurableTopologyTxnWriter {
         })
     }
 
+    pub fn resume_publish(prepared: PreparedTopologyTxn) -> Result<Self, TopologyTxnError> {
+        let prepared_bytes = prepared.encode()?;
+        let target_bytes = prepared.target.encode()?;
+        Ok(Self {
+            next_op_id: prepared.txn_id.saturating_mul(16).saturating_add(9),
+            prepared,
+            prepared_bytes,
+            target_bytes,
+            state: TopologyTxnState::PublishIdle,
+            active_op: None,
+        })
+    }
+
     pub fn state(&self) -> TopologyTxnState {
         self.state
     }

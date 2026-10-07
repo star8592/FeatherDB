@@ -96,3 +96,48 @@ Recovery returns Current, ReplayPrepared, Empty or RecoveryConflict. It never re
 Crash tests cover pre-PREPARED-sync, post-PREPARED/pre-apply, and post-current-Put/pre-current-Sync boundaries.
 
 RuntimeCoordinator wiring remains the next step; the replay substrate is now executable rather than only documented.
+
+
+## RuntimeCoordinator durable resize integration
+
+The replayable topology transaction is now wired into coordinated tablet resize through a thin orchestration layer rather than embedding disk concerns inside MigrationScheduler.
+
+The order is:
+
+    capture current runtime snapshot
+      -> derive exact target lifecycle from LifecycleResizePlan
+      -> PREPARED Put
+      -> Sync
+      -> stop at observable Prepared boundary
+      -> RuntimeCoordinator.commit_resize()
+      -> verify captured runtime snapshot == prepared target
+      -> CURRENT Put
+      -> Sync
+      -> Complete
+
+A newly durable PREPARED record is never applied in the same simulator tick that made it durable. This intentional boundary lets deterministic tests crash precisely after prepare and before in-memory apply.
+
+### Recovery
+
+recover_tablet_runtime() reads CURRENT/PREPARED and reconstructs TabletRuntimeCoordinator directly from the chosen TopologySnapshot.
+
+If recovery returns ReplayPrepared, the runtime is reconstructed from the prepared target and a resume-publish writer continues CURRENT publication. Post-resize migration work is regenerated from the recovered range/catalog state rather than persisted as queued tasks.
+
+### Crash matrix
+
+The implementation now crashes at every durable resize state-machine edge:
+
+    PreparePutPending  -> old CURRENT
+    PrepareSyncPending -> old CURRENT
+    Prepared           -> ReplayPrepared target
+    PublishPutPending  -> ReplayPrepared target
+    PublishSyncPending -> ReplayPrepared target
+    Complete           -> new CURRENT
+
+Every ReplayPrepared case can finish CURRENT publication and a second recovery then returns stable Current(target).
+
+DiskFull is separately tested both before PREPARED and during CURRENT publication. Before PREPARED it cannot mutate RuntimeCoordinator. During publication the in-memory target may already be applied, but durable PREPARED remains sufficient to recover the same target after crash.
+
+### Serialization assumption
+
+This v0 path assumes one serialized durable topology transaction at a time. A concurrent independently committed topology epoch while a PREPARED resize exists would produce RecoveryConflict rather than guessing an order. Future control-plane consensus must serialize these transactions explicitly.
