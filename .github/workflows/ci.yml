@@ -37,3 +37,9 @@ jobs:
           cargo fmt --manifest-path benchmarks/storage-backend/Cargo.toml --check
           cargo clippy --manifest-path benchmarks/storage-backend/Cargo.toml --all-targets -- -D warnings
           cargo check --manifest-path benchmarks/storage-backend/Cargo.toml
+
+      - name: Fjall adapter experiment
+        run: |
+          cargo fmt --manifest-path experiments/fjall-durable-adapter/Cargo.toml --check
+          cargo clippy --manifest-path experiments/fjall-durable-adapter/Cargo.toml --all-targets -- -D warnings
+          cargo test --manifest-path experiments/fjall-durable-adapter/Cargo.toml

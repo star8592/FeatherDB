@@ -325,6 +325,10 @@ Fault tests:
 
 Rust 1.99 / Edition 2024 is now the repository-wide toolchain baseline. The root rust-toolchain.toml pins 1.99.0 with rustfmt and clippy, and package manifests declare rust-version = 1.99. This intentionally ends the earlier 1.85/1.90 compatibility target so current Fjall/redb releases can be evaluated and integrated without hidden compiler-version exceptions. GitHub CI enforces the same 1.99.0 compiler plus fmt/clippy/test and storage-benchmark compile gates. Cargo resolver 3 is enabled. rust-analyzer 1.99.0 and rust-src are part of the pinned toolchain. CI uses actions/checkout 7.0.1 and gitleaks-action 3.0.0, and Dependabot checks Cargo workspaces plus GitHub Actions daily.
 
+### Real Fjall durability adapter
+
+Fjall real DurableStore adapter now passes seven protocol/recovery tests plus an external kill -9 crash probe on ext4: unsynced staged data disappears after process death, while SyncAll data survives. CI and Dependabot now cover the standalone experiment workspace. See docs/experiments/2026-10-08-fjall-durable-adapter.md.
+
 ### Production storage substrate benchmark
 
 Fjall 3.1.12 and redb 4.3.0 now have a reproducible standalone release benchmark on both rotational ext4 storage and a directional NVMe check. Equal durability semantics are used (Fjall SyncAll, redb Immediate).
@@ -335,7 +339,7 @@ Current hypothesis is single-engine Fjall V0 rather than redb-control + Fjall-da
 
 See docs/architecture/STORAGE-SUBSTRATE-v0.md and docs/experiments/2026-10-07-storage-backend-bench.md.
 
-Next priority: real Fjall DurableStore adapter against PREPARED/CURRENT recovery, concurrent-writer/compaction-tail storage tests, then QUIC transport substrate benchmark.
+Next priority: promote/reshape the validated Fjall DurableStore adapter toward a production storage crate, run concurrent-writer/compaction-tail tests, then QUIC transport substrate benchmark.
 
 ### Placement planner hypothesis
 
