@@ -19,7 +19,9 @@ pub mod transport;
 pub use compact::{CompactPlacement, CompactPlacementError};
 pub use compact_catalog::{CompactCatalogError, CompactTabletCatalog};
 pub use compact_migration::{CompactMigrationCursor, CompactMigrationMove};
-pub use compact_window::{CompactWindowError, CompactWindowPhase, CompactWindowScheduler};
+pub use compact_window::{
+    CompactWindowError, CompactWindowPhase, CompactWindowReconcileReport, CompactWindowScheduler,
+};
 
 pub use fault::{
     FaultAction, FaultEvent, FaultReplayReport, FaultTrace, FaultTraceParseError,

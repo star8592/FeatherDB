@@ -244,3 +244,16 @@ Likewise, `SimClock` currently controls the replay loop but has not yet replaced
 8. later protocol-specific liveness mode after safety-mode coverage is credible.
 
 Every new nondeterministic surface must be introduced behind an abstraction usable by both production-intent code and the simulator.
+
+
+## Reconcile-time transport cancellation
+
+Topology reconciliation is now transport-aware.
+
+Before MigrationScheduler discards stale tasks, it cancels every outstanding in-flight transfer through MigrationTransport.
+
+This prevents delayed simulated packets from surviving an epoch change and later being mistaken for traffic belonging to a newly reconstructed task/window.
+
+DirectMigrationTransport treats cancellation as a no-op because it has no queued packets. SimNetwork removes the packet from its in-flight map.
+
+A unit test exercises a delayed packet and verifies in-flight count becomes zero during reconcile.

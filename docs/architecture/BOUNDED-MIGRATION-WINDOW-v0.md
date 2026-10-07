@@ -228,3 +228,50 @@ Preferred scheduler direction:
       + existing MigrationScheduler for active work
 
 This achieves the low-memory goal without creating a second migration protocol.
+
+
+## Active-window topology epoch replacement
+
+A bounded window is reconstructible work and must never outlive a newer committed topology.
+
+CompactWindowScheduler now exposes a transport-aware desired-map replacement path with strict fencing:
+
+    proposed TopologyEpoch > current TopologyEpoch
+
+Equal or older epochs are rejected without mutation.
+
+When a higher epoch arrives:
+
+1. any ownership cutover already committed by the active inner scheduler is synchronized into compact actual placement;
+2. every old in-flight transfer is cancelled through MigrationTransport;
+3. unfinished old-window tasks are counted as cancelled and discarded;
+4. node runtime health is retained for surviving node identities and initialized for new nodes;
+5. the new cluster/desired placement becomes authoritative;
+6. active window state is discarded;
+7. global phase resets to Repair;
+8. catalog scanning restarts from slot 0 against current actual -> new desired.
+
+The new epoch therefore never resumes from stale task state.
+
+### Delayed-packet fencing
+
+This is important because each small inner MigrationScheduler may number tasks from 1 again.
+
+Without transport cancellation, a delayed packet belonging to an old window could remain in SimNetwork and later collide with a reused task ID.
+
+The lower-level MigrationScheduler now also has a transport-aware reconcile path and explicit cancel_outstanding_transfers().
+
+Executable tests verify:
+
+- a delayed packet is removed when MigrationScheduler reconciles;
+- equal epoch replacement is rejected without changing actual/desired;
+- a higher epoch cancels an active delayed compact window;
+- old in-flight count reaches zero before replanning;
+- already committed actual ownership is retained;
+- the new scheduler converges to the new desired map;
+- a node removed only in the newer epoch has zero replicas at final convergence.
+
+This extends the central fencing invariant:
+
+    TopologyEpoch controls ownership authority;
+    old work may consume time, but it may not commit into a newer topology.

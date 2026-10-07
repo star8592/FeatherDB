@@ -22,6 +22,7 @@ pub enum CompactWindowError {
     ZeroWindow,
     ShapeMismatch,
     MissingCatalogData(usize),
+    StaleEpoch { current: u64, proposed: u64 },
     Compact(CompactPlacementError),
     Migration(MigrationError),
 }
@@ -36,6 +37,14 @@ impl From<MigrationError> for CompactWindowError {
     fn from(value: MigrationError) -> Self {
         Self::Migration(value)
     }
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct CompactWindowReconcileReport {
+    pub old_epoch: u64,
+    pub new_epoch: u64,
+    pub cancelled_tasks: usize,
+    pub cancelled_inflight_transfers: usize,
 }
 
 #[derive(Debug)]
@@ -60,6 +69,9 @@ pub struct CompactWindowScheduler {
     peak_materialized_tasks: usize,
     peak_window_tablets: usize,
     total_windows_completed: usize,
+    total_epoch_replacements: usize,
+    total_cancelled_tasks: usize,
+    total_cancelled_inflight_transfers: usize,
 }
 
 impl CompactWindowScheduler {
@@ -106,7 +118,14 @@ impl CompactWindowScheduler {
             peak_materialized_tasks: 0,
             peak_window_tablets: 0,
             total_windows_completed: 0,
+            total_epoch_replacements: 0,
+            total_cancelled_tasks: 0,
+            total_cancelled_inflight_transfers: 0,
         })
+    }
+
+    pub fn topology_epoch(&self) -> u64 {
+        self.cluster.epoch
     }
 
     pub fn actual(&self) -> &CompactPlacement {
@@ -137,6 +156,18 @@ impl CompactWindowScheduler {
         self.total_windows_completed
     }
 
+    pub fn total_epoch_replacements(&self) -> usize {
+        self.total_epoch_replacements
+    }
+
+    pub fn total_cancelled_tasks(&self) -> usize {
+        self.total_cancelled_tasks
+    }
+
+    pub fn total_cancelled_inflight_transfers(&self) -> usize {
+        self.total_cancelled_inflight_transfers
+    }
+
     pub fn active_tasks(&self) -> Option<&[MigrationTask]> {
         self.active.as_ref().map(|window| window.scheduler.tasks())
     }
@@ -150,6 +181,72 @@ impl CompactWindowScheduler {
             let _ = active.scheduler.set_node_health(node_id, health);
         }
         true
+    }
+
+    pub fn reconcile_desired_with_transport<T: MigrationTransport>(
+        &mut self,
+        mut cluster: Cluster,
+        desired: CompactPlacement,
+        transport: &mut T,
+    ) -> Result<CompactWindowReconcileReport, CompactWindowError> {
+        let old_epoch = self.cluster.epoch;
+        if cluster.epoch <= old_epoch {
+            return Err(CompactWindowError::StaleEpoch {
+                current: old_epoch,
+                proposed: cluster.epoch,
+            });
+        }
+        if desired.tablet_count() != self.catalog.tablet_count() as u64
+            || desired.tablet_count() != self.actual.tablet_count()
+            || desired.replica_count() != self.actual.replica_count()
+        {
+            return Err(CompactWindowError::ShapeMismatch);
+        }
+
+        // Persist every ownership cutover already committed by the active
+        // inner scheduler before discarding its reconstructible task state.
+        self.sync_active_actual()?;
+
+        let mut cancelled_tasks = 0_usize;
+        let mut cancelled_inflight_transfers = 0_usize;
+        if let Some(active) = self.active.as_mut() {
+            cancelled_tasks = active
+                .scheduler
+                .tasks()
+                .iter()
+                .filter(|task| {
+                    !matches!(
+                        task.state,
+                        crate::migration::MigrationState::Complete
+                            | crate::migration::MigrationState::Stale
+                    )
+                })
+                .count();
+            cancelled_inflight_transfers = active.scheduler.cancel_outstanding_transfers(transport);
+        }
+
+        cluster.tablets.clear();
+        self.health
+            .retain(|node_id, _| cluster.nodes.contains_key(node_id));
+        for node_id in cluster.nodes.keys() {
+            self.health.entry(*node_id).or_insert(NodeHealth::Healthy);
+        }
+
+        self.cluster = cluster;
+        self.desired = desired;
+        self.active = None;
+        self.phase = CompactWindowPhase::Repair;
+        self.scan_slot = 0;
+        self.total_epoch_replacements += 1;
+        self.total_cancelled_tasks += cancelled_tasks;
+        self.total_cancelled_inflight_transfers += cancelled_inflight_transfers;
+
+        Ok(CompactWindowReconcileReport {
+            old_epoch,
+            new_epoch: self.cluster.epoch,
+            cancelled_tasks,
+            cancelled_inflight_transfers,
+        })
     }
 
     pub fn tick(&mut self) -> Result<TickReport, CompactWindowError> {
@@ -667,6 +764,157 @@ mod tests {
 
         assert!(scheduler.is_converged());
         assert_eq!(scheduler.actual(), &desired);
+    }
+
+    #[test]
+    fn stale_or_equal_epoch_replacement_is_rejected_without_mutation() {
+        let cat = catalog(5, vec![1, 2]);
+        let (before_cluster, after_cluster) = rebalance_clusters();
+        let actual = CompactPlacement::weighted_rendezvous_for_catalog(
+            &before_cluster,
+            &cat,
+            FailureDomainPolicy::HIERARCHICAL,
+        )
+        .unwrap();
+        let desired = CompactPlacement::weighted_rendezvous_for_catalog(
+            &after_cluster,
+            &cat,
+            FailureDomainPolicy::HIERARCHICAL,
+        )
+        .unwrap();
+
+        let mut scheduler = CompactWindowScheduler::new(
+            after_cluster.clone(),
+            cat,
+            actual.clone(),
+            desired.clone(),
+            FailureDomainPolicy::HIERARCHICAL,
+            MigrationBudget::conservative(),
+            8,
+        )
+        .unwrap();
+        let before_actual = scheduler.actual().clone();
+        let before_desired = scheduler.desired().clone();
+        let mut transport = DirectMigrationTransport;
+
+        assert_eq!(
+            scheduler.reconcile_desired_with_transport(after_cluster, desired, &mut transport,),
+            Err(CompactWindowError::StaleEpoch {
+                current: 2,
+                proposed: 2,
+            })
+        );
+        assert_eq!(scheduler.actual(), &before_actual);
+        assert_eq!(scheduler.desired(), &before_desired);
+        assert_eq!(scheduler.total_epoch_replacements(), 0);
+    }
+
+    #[test]
+    fn higher_epoch_cancels_old_inflight_window_and_replans_from_actual() {
+        let cat = CompactTabletCatalog::uniform(30_000, 32, 3_200).unwrap();
+        let old_cluster = Cluster {
+            epoch: 2,
+            replication_factor: 3,
+            nodes: [
+                node(1, 1, "a", AdminState::Removed),
+                node(2, 1, "b", AdminState::Active),
+                node(3, 1, "c", AdminState::Active),
+                node(4, 1, "d", AdminState::Active),
+            ]
+            .into_iter()
+            .map(|node| (node.id, node))
+            .collect(),
+            tablets: Vec::new(),
+        };
+
+        let actual_map = {
+            let mut map = RangeTabletMap::single(30_000, 3_200, vec![1, 2, 3]).unwrap();
+            for _ in 0..5 {
+                let split = map.plan_split_all(9).unwrap();
+                map.commit(&split, 9).unwrap();
+            }
+            CompactPlacement::from_range_map(&map).unwrap()
+        };
+        let old_desired = CompactPlacement::weighted_rendezvous_for_catalog(
+            &old_cluster,
+            &cat,
+            FailureDomainPolicy::HIERARCHICAL,
+        )
+        .unwrap();
+
+        let mut scheduler = CompactWindowScheduler::new(
+            old_cluster.clone(),
+            cat.clone(),
+            actual_map,
+            old_desired,
+            FailureDomainPolicy::HIERARCHICAL,
+            MigrationBudget {
+                max_active: 1,
+                max_per_node_active: 1,
+                bytes_per_tick: 100,
+                max_bytes_per_node_per_tick: 100,
+                max_bytes_per_task_per_tick: 100,
+            },
+            4,
+        )
+        .unwrap();
+
+        let mut network = SimNetwork::default();
+        network.set_delay(2, 4, 20);
+        let first = scheduler.tick_with_transport(0, &mut network).unwrap();
+        assert_eq!(first.bytes_copied, 0);
+        assert_eq!(network.in_flight_count(), 1);
+        assert_eq!(scheduler.topology_epoch(), 2);
+
+        let actual_before_reconcile = scheduler.actual().clone();
+
+        let mut next_cluster = old_cluster;
+        next_cluster.epoch = 3;
+        next_cluster.nodes.get_mut(&4).unwrap().state = AdminState::Removed;
+        next_cluster
+            .nodes
+            .insert(5, node(5, 1, "e", AdminState::Active));
+        let next_desired = CompactPlacement::weighted_rendezvous_for_catalog(
+            &next_cluster,
+            &cat,
+            FailureDomainPolicy::HIERARCHICAL,
+        )
+        .unwrap();
+
+        let report = scheduler
+            .reconcile_desired_with_transport(next_cluster, next_desired.clone(), &mut network)
+            .unwrap();
+
+        assert_eq!(report.old_epoch, 2);
+        assert_eq!(report.new_epoch, 3);
+        assert_eq!(report.cancelled_inflight_transfers, 1);
+        assert!(report.cancelled_tasks >= 1);
+        assert_eq!(network.in_flight_count(), 0);
+        assert_eq!(scheduler.topology_epoch(), 3);
+        assert_eq!(scheduler.actual(), &actual_before_reconcile);
+        assert_eq!(scheduler.desired(), &next_desired);
+        assert!(scheduler.active_tasks().is_none());
+
+        for tick in 1..10_000 {
+            if scheduler.is_converged() {
+                break;
+            }
+            scheduler.tick_with_transport(tick, &mut network).unwrap();
+        }
+
+        assert!(scheduler.is_converged());
+        assert_eq!(scheduler.actual(), &next_desired);
+        assert_eq!(scheduler.total_epoch_replacements(), 1);
+        assert_eq!(scheduler.total_cancelled_inflight_transfers(), 1);
+        assert_eq!(
+            scheduler
+                .actual()
+                .replica_counts()
+                .get(&4)
+                .copied()
+                .unwrap_or(0),
+            0
+        );
     }
 
     #[test]

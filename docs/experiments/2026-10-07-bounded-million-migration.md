@@ -98,3 +98,30 @@ The branch must pass the full repository quality gate after these tests are adde
 - reverse TabletId-index alternatives;
 - general deterministic message bus;
 - production storage/transport substrate benchmarks.
+
+
+## Epoch replacement follow-up
+
+A focused test starts a forced Repair under TopologyEpoch 2 with a delayed source->target packet still in SimNetwork.
+
+Before that packet is delivered, TopologyEpoch 3 is committed with a different desired placement that also removes the old target node.
+
+Observed behavior:
+
+    old in-flight packet count before reconcile = 1
+    proposed epoch = 3
+    old epoch = 2
+    cancelled in-flight transfers = 1
+    old in-flight packet count after reconcile = 0
+
+The compact scheduler retains its current committed actual map, discards the old active window, resets to Repair phase, and replans against epoch-3 desired placement.
+
+Final result:
+
+    converged = true
+    actual == epoch-3 desired
+    replicas on node removed in epoch 3 = 0
+
+Equal-epoch replacement is independently rejected as stale and leaves state unchanged.
+
+This closes the main late-packet/old-window fencing risk identified after the million-tablet bounded-window experiment.

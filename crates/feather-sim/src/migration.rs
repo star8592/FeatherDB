@@ -211,6 +211,17 @@ impl MigrationScheduler {
         cluster: Cluster,
         desired: Placement,
     ) -> Result<(), MigrationError> {
+        let mut transport = DirectMigrationTransport;
+        self.reconcile_desired_with_transport(cluster, desired, &mut transport)
+    }
+
+    pub fn reconcile_desired_with_transport<T: MigrationTransport>(
+        &mut self,
+        cluster: Cluster,
+        desired: Placement,
+        transport: &mut T,
+    ) -> Result<(), MigrationError> {
+        self.cancel_outstanding_transfers(transport);
         self.total_cancelled += self
             .tasks
             .iter()
@@ -226,6 +237,22 @@ impl MigrationScheduler {
         self.desired = desired;
         self.tasks.clear();
         self.rebuild_tasks()
+    }
+
+    pub fn cancel_outstanding_transfers<T: MigrationTransport>(
+        &mut self,
+        transport: &mut T,
+    ) -> usize {
+        let mut cancelled = 0_usize;
+        for task in &mut self.tasks {
+            if task.in_flight_bytes > 0 {
+                transport.cancel(task.id);
+                task.in_flight_bytes = 0;
+                task.in_flight_offset = 0;
+                cancelled += 1;
+            }
+        }
+        cancelled
     }
 
     pub fn tick(&mut self) -> TickReport {
@@ -1688,6 +1715,47 @@ mod tests {
         assert_eq!(network.in_flight_count(), 0);
         assert_eq!(scheduler.actual(), &desired);
         assert!(scheduler.is_converged());
+    }
+
+    #[test]
+    fn transport_aware_reconcile_cancels_old_delayed_packet() {
+        let cluster = one_tablet_cluster(100);
+        let actual = Placement {
+            replicas: BTreeMap::from([(1, vec![1, 2])]),
+        };
+        let desired = Placement {
+            replicas: BTreeMap::from([(1, vec![1, 3])]),
+        };
+        let mut scheduler = MigrationScheduler::new(
+            cluster.clone(),
+            FailureDomainPolicy::HIERARCHICAL,
+            actual.clone(),
+            desired,
+            MigrationBudget {
+                max_active: 1,
+                max_per_node_active: 1,
+                bytes_per_tick: 100,
+                max_bytes_per_node_per_tick: 100,
+                max_bytes_per_task_per_tick: 100,
+            },
+        )
+        .unwrap();
+
+        let mut network = crate::transport::SimNetwork::default();
+        network.set_delay(2, 3, 10);
+        scheduler.tick_with_transport(0, &mut network);
+        assert_eq!(network.in_flight_count(), 1);
+
+        let mut next_cluster = cluster;
+        next_cluster.epoch = 2;
+        scheduler
+            .reconcile_desired_with_transport(next_cluster, actual.clone(), &mut network)
+            .unwrap();
+
+        assert_eq!(network.in_flight_count(), 0);
+        assert_eq!(scheduler.desired(), &actual);
+        assert!(scheduler.tasks().is_empty());
+        assert_eq!(scheduler.total_cancelled, 1);
     }
 
     #[test]
