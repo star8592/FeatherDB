@@ -138,7 +138,7 @@ This is a substrate microbenchmark only. It is not a claim about WAN performance
 
 ## Benchmark result
 
-The first Quinn 0.11.12 loopback benchmark passed three consecutive runs. Median handshake was 1.024 ms; 512-byte fresh bidirectional-stream control RTT measured p50 22 us / p95 36 us / p99 117 us; a 64 MiB bidirectional echo completed in 185 ms, approximately 691 MiB/s aggregate duplex goodput.
+The first Quinn 0.11.12 loopback benchmark passed three consecutive runs. In the final ring-only configuration, median handshake was 1.180 ms; 512-byte fresh bidirectional-stream control RTT measured p50 23 us / p95 41 us / p99 189 us; a 64 MiB bidirectional echo completed in 200 ms, approximately 640 MiB/s aggregate duplex goodput.
 
 The benchmark's ~208 MiB median peak RSS is dominated by deliberately holding 64 MiB send and receive buffers plus both endpoints in one process. Production repair/migration must be chunk-streaming and bounded; read_to_end on a tablet-sized payload is prohibited.
 
@@ -162,3 +162,15 @@ Candidate references:
 - https://docs.rs/quinn/0.11.12/quinn/
 - https://docs.rs/quinn/0.11.12/quinn/trait.Runtime.html
 - https://docs.rs/iroh/1.3.0/iroh/
+
+
+## Crypto provider policy
+
+The V0 Quinn/rustls stack is explicitly ring-only. Direct rustls dependencies use default-features = false with ring/std/tls12, while Quinn uses rustls-ring. This avoids implicitly compiling aws-lc-rs alongside ring and keeps the common binary/dependency surface smaller.
+
+
+## Real two-machine gate
+
+The Quinn substrate has now passed a real Z890-to-XPS15 LAN test with certificate verification enabled. Across three runs, median handshake was 5.006 ms, control-stream RTT p50/p95/p99 was 2.405/4.299/6.040 ms, and 64 MiB bidirectional echo delivered approximately 43.77 MiB/s aggregate duplex goodput across the current Ethernet/Wi-Fi path.
+
+This clears the V0 multi-machine substrate gate. It does not yet clear WAN/NAT/reconnect stress.

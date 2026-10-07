@@ -3,7 +3,7 @@
 Status: Active
 
 Official-source audit: `docs/reviews/OFFICIAL-DOC-AUDIT-2026-10-06.md`
-Last reviewed: 2026-10-07
+Last reviewed: 2026-10-08
 
 This is the execution plan for the research/pre-prototype phase. It supersedes ad-hoc implementation order; `docs/ROADMAP.md` remains the broader research roadmap.
 
@@ -321,7 +321,7 @@ Fault tests:
 - Phase 1.3: partial; strong-node join and failure-domain-pressure scenarios implemented.
 - RF=2 single-node removal movement now matches a failure-domain-aware constrained lower bound exactly.
 - Tablet resize controller: logical count control implemented with hysteresis, cooldown, metadata budget, epoch/generation fencing, and replay idempotency.
-- Core simulator tests: 217 passing; production Fjall adapter tests: 9 passing.
+- Core simulator tests: 218 passing; production Fjall adapter tests: 9 passing; production Quinn tests: 4 passing; feather-wire tests: 3 passing.
 - First experiment: `docs/experiments/2026-10-06-placement-baseline.md`.
 - ADR-0001: still Proposed.
 - ADR-0002: still Proposed.
@@ -349,15 +349,15 @@ Fjall 3.1.12 and redb 4.3.0 now have a reproducible standalone release benchmark
 
 HDD three-run medians show Fjall ~1.74x faster for 100 x 1K durable streaming batches and ~26% smaller files, while redb has lower RSS, faster reopen and somewhat faster sparse durable control writes. NVMe collapses the streaming difference to near parity. A naive Fjall 8 MiB memtable/cache profile failed to lower RSS and increased disk footprint, so it is explicitly rejected.
 
-Current hypothesis is single-engine Fjall V0 rather than redb-control + Fjall-data, because control commits are sparse and dual engines expand the recovery/operations surface. The Rust toolchain decision is now explicit: FeatherDB targets Rust 1.99 / Edition 2024. The storage choice remains conditional on a real Fjall durable adapter and concurrency/compaction tests.
+ADR-0004 accepts single-engine Fjall for V0 rather than redb-control + Fjall-data. The real adapter, kill -9 durability test, HDD/NVMe comparison and concurrent-writer/compaction-tail experiments now provide the required evidence. Control durability stays serialized; future data writes require bounded, device-aware group commit.
 
 See docs/architecture/STORAGE-SUBSTRATE-v0.md and docs/experiments/2026-10-07-storage-backend-bench.md.
 
 ### QUIC substrate benchmark
 
-Quinn 0.11.12 + Tokio 1.53.2 + rustls 0.23.45 now pass a three-run loopback TLS/QUIC benchmark: median handshake 1.024 ms, 512-byte stream RTT p50/p95/p99 22/36/117 us, and 64 MiB duplex echo ~691 MiB/s. Quinn is accepted as the V0 core substrate candidate. Iroh remains an optional future NAT/relay connectivity layer rather than a mandatory dependency. See docs/architecture/NETWORK-SUBSTRATE-v0.md.
+ADR-0005 accepts Quinn 0.11.12 + Tokio 1.53.2 + rustls 0.23.45 (ring-only) as the V0 core transport. Loopback, bounded backpressure, real SWIM Ping/Ack over QUIC, and a three-run Z890↔XPS15 TLS/QUIC LAN gate all pass. Iroh remains an optional future NAT/relay connectivity layer rather than a mandatory dependency. See docs/architecture/NETWORK-SUBSTRATE-v0.md.
 
-Next priority: implement a bounded production Quinn adapter with reconnect/backpressure, then wire leaderless data messages over production storage/transport interfaces and build the first three-node featherd prototype.
+Next priority: extract the leaderless data semantic kernel from feather-sim into a production crate, persist replica mutations through Fjall, define data wire messages over feather-wire/Quinn, and build the first three-node featherd prototype with PUT/GET/DELETE quorum behavior.
 
 ### Placement planner hypothesis
 
@@ -380,7 +380,7 @@ Experiment evidence now separates candidate ranking from final allocation. WRH i
 - vector search
 - Kubernetes operator
 - admin UI
-- production QUIC protocol
+- WAN/NAT/relay productionization
 - custom storage engine
 - compatibility guarantees
 
