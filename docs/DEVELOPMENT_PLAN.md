@@ -323,7 +323,7 @@ Fault tests:
 
 ### Rust toolchain baseline
 
-Rust 1.99 / Edition 2024 is now the repository-wide toolchain baseline. The root rust-toolchain.toml pins 1.99.0 with rustfmt and clippy, and package manifests declare rust-version = 1.99. This intentionally ends the earlier 1.85/1.90 compatibility target so current Fjall/redb releases can be evaluated and integrated without hidden compiler-version exceptions. GitHub CI enforces the same 1.99.0 compiler plus fmt/clippy/test and storage-benchmark compile gates.
+Rust 1.99 / Edition 2024 is now the repository-wide toolchain baseline. The root rust-toolchain.toml pins 1.99.0 with rustfmt and clippy, and package manifests declare rust-version = 1.99. This intentionally ends the earlier 1.85/1.90 compatibility target so current Fjall/redb releases can be evaluated and integrated without hidden compiler-version exceptions. GitHub CI enforces the same 1.99.0 compiler plus fmt/clippy/test and storage-benchmark compile gates. Cargo resolver 3 is enabled. rust-analyzer 1.99.0 and rust-src are part of the pinned toolchain. CI uses actions/checkout 7.0.1 and gitleaks-action 3.0.0, and Dependabot checks Cargo workspaces plus GitHub Actions daily.
 
 ### Production storage substrate benchmark
 
