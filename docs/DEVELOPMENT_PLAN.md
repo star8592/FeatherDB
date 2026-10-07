@@ -234,13 +234,16 @@ Implemented:
 - direct replay against real MigrationScheduler / Repair logic;
 - in-flight chunk fencing and cancellation on Repair source failover;
 - same-seed/same-trace reproducibility checks;
-- bounded health/network-fault convergence tests.
+- bounded health/network-fault convergence tests;
+- shared deterministic message bus for Membership/Gossip/Control/Data/Repair/Client classes;
+- explicit bounded message/byte queues with Backpressure;
+- protocol-independent ScheduledMessage replay harness;
+- mixed-protocol fixed-seed replay with identical full delivery trace.
 
-See docs/architecture/DETERMINISTIC-FAULTS-v0.md, docs/experiments/2026-10-07-deterministic-fault-replay.md, and docs/experiments/2026-10-07-deterministic-network.md.
+See docs/architecture/DETERMINISTIC-FAULTS-v0.md, docs/architecture/DETERMINISTIC-MESSAGE-BUS-v0.md, docs/experiments/2026-10-07-deterministic-fault-replay.md, docs/experiments/2026-10-07-deterministic-network.md, and docs/experiments/2026-10-07-message-bus.md.
 
 Still open:
 
-- general deterministic message bus shared by future membership/control/data protocols;
 - disk-full/slow/corrupt I/O;
 - CPU stall;
 - 100-node topology churn campaign.
@@ -306,12 +309,12 @@ Fault tests:
 - Phase 1.3: partial; strong-node join and failure-domain-pressure scenarios implemented.
 - RF=2 single-node removal movement now matches a failure-domain-aware constrained lower bound exactly.
 - Tablet resize controller: logical count control implemented with hysteresis, cooldown, metadata budget, epoch/generation fencing, and replay idempotency.
-- Tests: 124 passing.
+- Tests: 135 passing.
 - First experiment: `docs/experiments/2026-10-06-placement-baseline.md`.
 - ADR-0001: still Proposed.
 - ADR-0002: still Proposed.
 
-Next priority: general deterministic message bus, tablet-resize/migration generation fencing, then production-substrate benchmarks.
+Next priority: tablet-resize/migration generation fencing, actual Membership/SWIM state machine on the shared bus, deterministic disk adapter, then production-substrate benchmarks.
 
 ### Placement planner hypothesis
 

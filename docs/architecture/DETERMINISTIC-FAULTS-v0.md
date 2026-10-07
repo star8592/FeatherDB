@@ -234,13 +234,13 @@ Likewise, `SimClock` currently controls the replay loop but has not yet replaced
 
 ## Next fault surfaces
 
-1. general deterministic message bus shared by membership/control/data protocols;
-2. disk full / slow I/O / corruption adapter;
-3. target-node crash during in-flight write;
-4. CPU stall / scheduler starvation;
-5. topology join/leave/replace churn;
-6. 100-node randomized campaign;
-7. persist failing traces automatically from CI;
+1. disk full / slow I/O / corruption adapter;
+2. target-node crash during in-flight write;
+3. CPU stall / scheduler starvation;
+4. topology join/leave/replace churn;
+5. 100-node randomized campaign;
+6. persist failing traces automatically from CI;
+7. actual Membership/SWIM and control-plane state machines on the shared message bus;
 8. later protocol-specific liveness mode after safety-mode coverage is credible.
 
 Every new nondeterministic surface must be introduced behind an abstraction usable by both production-intent code and the simulator.
@@ -257,3 +257,12 @@ This prevents delayed simulated packets from surviving an epoch change and later
 DirectMigrationTransport treats cancellation as a no-op because it has no queued packets. SimNetwork removes the packet from its in-flight map.
 
 A unit test exercises a delayed packet and verifies in-flight count becomes zero during reconcile.
+
+
+## General deterministic message bus
+
+The network fault substrate is no longer migration-only. SimNetwork now provides a bounded generic message bus for Membership, Gossip, Control, Data, Repair and Client message classes. Generic messages and MigrationTransport share the same directional link fault state.
+
+A protocol-independent replay harness runs ScheduledMessage workloads against FaultTrace V2 and records deterministic delivery traces and queue peaks.
+
+See docs/architecture/DETERMINISTIC-MESSAGE-BUS-v0.md and docs/experiments/2026-10-07-message-bus.md.

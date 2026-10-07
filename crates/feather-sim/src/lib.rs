@@ -6,6 +6,7 @@ pub mod compact_migration;
 pub mod compact_window;
 pub mod fault;
 mod hash;
+pub mod message_replay;
 pub mod metrics;
 pub mod migration;
 pub mod model;
@@ -26,7 +27,12 @@ pub use compact_window::{
 
 pub use fault::{
     FaultAction, FaultEvent, FaultReplayReport, FaultTrace, FaultTraceParseError,
-    replay_migration_faults, replay_migration_faults_with_network,
+    apply_network_fault_action, replay_migration_faults, replay_migration_faults_with_network,
+};
+
+pub use message_replay::{
+    DeliveredMessage, MessageReplayReport, MessageReplayResult, ScheduledMessage,
+    replay_message_schedule,
 };
 
 pub use metrics::{
@@ -65,6 +71,7 @@ pub use split_boundary::{
 };
 
 pub use transport::{
-    DirectMigrationTransport, MigrationTransport, SimClock, SimNetwork, TransferPoll,
-    TransferRequest, TransferSubmit,
+    DirectMigrationTransport, MessageAdvanceReport, MessageBusLimits, MessageClass, MessageSend,
+    MigrationTransport, SimClock, SimMessage, SimNetwork, TransferPoll, TransferRequest,
+    TransferSubmit,
 };

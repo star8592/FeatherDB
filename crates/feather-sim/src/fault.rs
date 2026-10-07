@@ -645,29 +645,20 @@ pub fn replay_migration_faults_with_network(
     report
 }
 
-fn apply_fault_action(
-    scheduler: &mut MigrationScheduler,
-    network: Option<&mut SimNetwork>,
-    action: FaultAction,
-) {
+pub fn apply_network_fault_action(network: &mut SimNetwork, action: FaultAction) -> bool {
     match action {
-        FaultAction::SetNodeHealth { node_id, health } => {
-            let _ = scheduler.set_node_health(node_id, health);
-        }
+        FaultAction::SetNodeHealth { .. } => false,
         FaultAction::SetLinkDelay { from, to, ticks } => {
-            if let Some(network) = network {
-                network.set_delay(from, to, ticks);
-            }
+            network.set_delay(from, to, ticks);
+            true
         }
         FaultAction::DropNext { from, to, count } => {
-            if let Some(network) = network {
-                network.drop_next(from, to, count);
-            }
+            network.drop_next(from, to, count);
+            true
         }
         FaultAction::DuplicateNext { from, to, count } => {
-            if let Some(network) = network {
-                network.duplicate_next(from, to, count);
-            }
+            network.duplicate_next(from, to, count);
+            true
         }
         FaultAction::ReorderNext {
             from,
@@ -675,28 +666,40 @@ fn apply_fault_action(
             count,
             extra_delay_ticks,
         } => {
-            if let Some(network) = network {
-                network.reorder_next(from, to, count, extra_delay_ticks);
-            }
+            network.reorder_next(from, to, count, extra_delay_ticks);
+            true
         }
         FaultAction::Partition {
             a,
             b,
             bidirectional,
         } => {
-            if let Some(network) = network {
-                network.partition(a, b, bidirectional);
-            }
+            network.partition(a, b, bidirectional);
+            true
         }
         FaultAction::Heal {
             a,
             b,
             bidirectional,
         } => {
-            if let Some(network) = network {
-                network.heal(a, b, bidirectional);
-            }
+            network.heal(a, b, bidirectional);
+            true
         }
+    }
+}
+
+fn apply_fault_action(
+    scheduler: &mut MigrationScheduler,
+    network: Option<&mut SimNetwork>,
+    action: FaultAction,
+) {
+    if let FaultAction::SetNodeHealth { node_id, health } = action {
+        let _ = scheduler.set_node_health(node_id, health);
+        return;
+    }
+
+    if let Some(network) = network {
+        let _ = apply_network_fault_action(network, action);
     }
 }
 
@@ -851,6 +854,29 @@ mod tests {
         assert_eq!(a.actual(), b.actual());
         assert_eq!(a.tasks().len(), b.tasks().len());
         assert!(report_a.converged);
+    }
+
+    #[test]
+    fn network_fault_actions_apply_without_migration_scheduler() {
+        let mut network = SimNetwork::default();
+        assert!(apply_network_fault_action(
+            &mut network,
+            FaultAction::Partition {
+                a: 1,
+                b: 2,
+                bidirectional: false,
+            },
+        ));
+        assert!(network.is_partitioned(1, 2));
+        assert!(!network.is_partitioned(2, 1));
+
+        assert!(!apply_network_fault_action(
+            &mut network,
+            FaultAction::SetNodeHealth {
+                node_id: 1,
+                health: NodeHealth::Unavailable,
+            },
+        ));
     }
 
     #[test]
