@@ -10,8 +10,12 @@ pub mod planner;
 pub mod range_resize;
 pub mod resize;
 pub mod split_boundary;
+pub mod transport;
 
-pub use fault::{FaultAction, FaultEvent, FaultReplayReport, FaultTrace, replay_migration_faults};
+pub use fault::{
+    FaultAction, FaultEvent, FaultReplayReport, FaultTrace, FaultTraceParseError,
+    replay_migration_faults, replay_migration_faults_with_network,
+};
 
 pub use metrics::{
     JoinMovementBreakdown, PlacementMetrics, TransitionMovementBreakdown,
@@ -41,4 +45,9 @@ pub use split_boundary::{
     RangeLoadSample, SplitBoundaryDecision, SplitBoundaryError, SplitBoundaryPolicy,
     SplitBoundaryStrategy, SplitPolicyDecision, SplitPolicyError, SplitPolicyReason,
     choose_split_boundary, choose_split_boundary_with_policy,
+};
+
+pub use transport::{
+    DirectMigrationTransport, MigrationTransport, SimClock, SimNetwork, TransferPoll,
+    TransferRequest, TransferSubmit,
 };

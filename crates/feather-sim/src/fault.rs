@@ -1,9 +1,44 @@
 use crate::migration::{MigrationScheduler, NodeHealth};
 use crate::model::NodeId;
+use crate::transport::{SimClock, SimNetwork};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum FaultAction {
-    SetNodeHealth { node_id: NodeId, health: NodeHealth },
+    SetNodeHealth {
+        node_id: NodeId,
+        health: NodeHealth,
+    },
+    SetLinkDelay {
+        from: NodeId,
+        to: NodeId,
+        ticks: u64,
+    },
+    DropNext {
+        from: NodeId,
+        to: NodeId,
+        count: u64,
+    },
+    DuplicateNext {
+        from: NodeId,
+        to: NodeId,
+        count: u64,
+    },
+    ReorderNext {
+        from: NodeId,
+        to: NodeId,
+        count: u64,
+        extra_delay_ticks: u64,
+    },
+    Partition {
+        a: NodeId,
+        b: NodeId,
+        bidirectional: bool,
+    },
+    Heal {
+        a: NodeId,
+        b: NodeId,
+        bidirectional: bool,
+    },
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -43,7 +78,7 @@ impl FaultTrace {
     }
 
     pub fn to_text(&self) -> String {
-        let mut out = format!("feather-fault-trace-v1,{}\n", self.seed);
+        let mut out = format!("feather-fault-trace-v2,{}\n", self.seed);
         for event in &self.events {
             match event.action {
                 FaultAction::SetNodeHealth { node_id, health } => {
@@ -57,6 +92,64 @@ impl FaultTrace {
                         event.tick, event.sequence, node_id, health
                     ));
                 }
+                FaultAction::SetLinkDelay { from, to, ticks } => {
+                    out.push_str(&format!(
+                        "{},{},link-delay,{},{},{}\n",
+                        event.tick, event.sequence, from, to, ticks
+                    ));
+                }
+                FaultAction::DropNext { from, to, count } => {
+                    out.push_str(&format!(
+                        "{},{},drop-next,{},{},{}\n",
+                        event.tick, event.sequence, from, to, count
+                    ));
+                }
+                FaultAction::DuplicateNext { from, to, count } => {
+                    out.push_str(&format!(
+                        "{},{},duplicate-next,{},{},{}\n",
+                        event.tick, event.sequence, from, to, count
+                    ));
+                }
+                FaultAction::ReorderNext {
+                    from,
+                    to,
+                    count,
+                    extra_delay_ticks,
+                } => {
+                    out.push_str(&format!(
+                        "{},{},reorder-next,{},{},{},{}
+",
+                        event.tick, event.sequence, from, to, count, extra_delay_ticks
+                    ));
+                }
+                FaultAction::Partition {
+                    a,
+                    b,
+                    bidirectional,
+                } => {
+                    out.push_str(&format!(
+                        "{},{},partition,{},{},{}\n",
+                        event.tick,
+                        event.sequence,
+                        a,
+                        b,
+                        if bidirectional { 1 } else { 0 }
+                    ));
+                }
+                FaultAction::Heal {
+                    a,
+                    b,
+                    bidirectional,
+                } => {
+                    out.push_str(&format!(
+                        "{},{},heal,{},{},{}\n",
+                        event.tick,
+                        event.sequence,
+                        a,
+                        b,
+                        if bidirectional { 1 } else { 0 }
+                    ));
+                }
             }
         }
         out
@@ -66,7 +159,10 @@ impl FaultTrace {
         let mut lines = input.lines();
         let header = lines.next().ok_or(FaultTraceParseError::MissingHeader)?;
         let mut header_parts = header.split(',');
-        if header_parts.next() != Some("feather-fault-trace-v1") {
+        let version = header_parts
+            .next()
+            .ok_or(FaultTraceParseError::InvalidVersion)?;
+        if !matches!(version, "feather-fault-trace-v1" | "feather-fault-trace-v2") {
             return Err(FaultTraceParseError::InvalidVersion);
         }
         let seed = header_parts
@@ -84,7 +180,7 @@ impl FaultTrace {
                 continue;
             }
             let parts: Vec<_> = line.split(',').collect();
-            if parts.len() != 5 || parts[2] != "node-health" {
+            if parts.len() < 5 {
                 return Err(FaultTraceParseError::InvalidEvent);
             }
 
@@ -94,20 +190,84 @@ impl FaultTrace {
             let sequence = parts[1]
                 .parse::<u64>()
                 .map_err(|_| FaultTraceParseError::InvalidEvent)?;
-            let node_id = parts[3]
-                .parse::<NodeId>()
-                .map_err(|_| FaultTraceParseError::InvalidEvent)?;
-            let health = match parts[4] {
-                "healthy" => NodeHealth::Healthy,
-                "suspect" => NodeHealth::Suspect,
-                "unavailable" => NodeHealth::Unavailable,
-                _ => return Err(FaultTraceParseError::InvalidHealth),
+
+            let parse_node = |value: &str| {
+                value
+                    .parse::<NodeId>()
+                    .map_err(|_| FaultTraceParseError::InvalidEvent)
+            };
+            let parse_u64 = |value: &str| {
+                value
+                    .parse::<u64>()
+                    .map_err(|_| FaultTraceParseError::InvalidEvent)
+            };
+            let parse_bool = |value: &str| match value {
+                "0" => Ok(false),
+                "1" => Ok(true),
+                _ => Err(FaultTraceParseError::InvalidEvent),
+            };
+
+            let action = match parts[2] {
+                "node-health" if parts.len() == 5 => {
+                    let node_id = parse_node(parts[3])?;
+                    let health = match parts[4] {
+                        "healthy" => NodeHealth::Healthy,
+                        "suspect" => NodeHealth::Suspect,
+                        "unavailable" => NodeHealth::Unavailable,
+                        _ => return Err(FaultTraceParseError::InvalidHealth),
+                    };
+                    FaultAction::SetNodeHealth { node_id, health }
+                }
+                "link-delay" if version == "feather-fault-trace-v2" && parts.len() == 6 => {
+                    FaultAction::SetLinkDelay {
+                        from: parse_node(parts[3])?,
+                        to: parse_node(parts[4])?,
+                        ticks: parse_u64(parts[5])?,
+                    }
+                }
+                "drop-next" if version == "feather-fault-trace-v2" && parts.len() == 6 => {
+                    FaultAction::DropNext {
+                        from: parse_node(parts[3])?,
+                        to: parse_node(parts[4])?,
+                        count: parse_u64(parts[5])?,
+                    }
+                }
+                "duplicate-next" if version == "feather-fault-trace-v2" && parts.len() == 6 => {
+                    FaultAction::DuplicateNext {
+                        from: parse_node(parts[3])?,
+                        to: parse_node(parts[4])?,
+                        count: parse_u64(parts[5])?,
+                    }
+                }
+                "reorder-next" if version == "feather-fault-trace-v2" && parts.len() == 7 => {
+                    FaultAction::ReorderNext {
+                        from: parse_node(parts[3])?,
+                        to: parse_node(parts[4])?,
+                        count: parse_u64(parts[5])?,
+                        extra_delay_ticks: parse_u64(parts[6])?,
+                    }
+                }
+                "partition" if version == "feather-fault-trace-v2" && parts.len() == 6 => {
+                    FaultAction::Partition {
+                        a: parse_node(parts[3])?,
+                        b: parse_node(parts[4])?,
+                        bidirectional: parse_bool(parts[5])?,
+                    }
+                }
+                "heal" if version == "feather-fault-trace-v2" && parts.len() == 6 => {
+                    FaultAction::Heal {
+                        a: parse_node(parts[3])?,
+                        b: parse_node(parts[4])?,
+                        bidirectional: parse_bool(parts[5])?,
+                    }
+                }
+                _ => return Err(FaultTraceParseError::InvalidEvent),
             };
 
             events.push(FaultEvent {
                 tick,
                 sequence,
-                action: FaultAction::SetNodeHealth { node_id, health },
+                action,
             });
         }
 
@@ -159,6 +319,235 @@ impl FaultTrace {
 
         Self::new(seed, events)
     }
+
+    pub fn generate_network_faults(
+        seed: u64,
+        node_ids: &[NodeId],
+        episode_count: usize,
+        max_gap_ticks: u64,
+        max_duration_ticks: u64,
+        max_delay_ticks: u64,
+    ) -> Self {
+        assert!(node_ids.len() >= 2, "at least two nodes are required");
+        assert!(max_gap_ticks > 0, "max_gap_ticks must be > 0");
+        assert!(max_duration_ticks > 0, "max_duration_ticks must be > 0");
+        assert!(max_delay_ticks > 0, "max_delay_ticks must be > 0");
+
+        let mut rng = SplitMix64::new(seed);
+        let mut events = Vec::new();
+        let mut tick = 0_u64;
+        let mut sequence = 0_u64;
+
+        for _ in 0..episode_count {
+            tick = tick.saturating_add(1 + rng.next_u64() % max_gap_ticks);
+
+            let from_index = (rng.next_u64() as usize) % node_ids.len();
+            let mut to_index = (rng.next_u64() as usize) % node_ids.len();
+            if to_index == from_index {
+                to_index = (to_index + 1) % node_ids.len();
+            }
+            let from = node_ids[from_index];
+            let to = node_ids[to_index];
+
+            match rng.next_u64() % 5 {
+                0 => {
+                    let duration = 1 + rng.next_u64() % max_duration_ticks;
+                    let bidirectional = rng.next_u64() % 2 == 0;
+                    events.push(FaultEvent {
+                        tick,
+                        sequence,
+                        action: FaultAction::Partition {
+                            a: from,
+                            b: to,
+                            bidirectional,
+                        },
+                    });
+                    sequence += 1;
+                    events.push(FaultEvent {
+                        tick: tick.saturating_add(duration),
+                        sequence,
+                        action: FaultAction::Heal {
+                            a: from,
+                            b: to,
+                            bidirectional,
+                        },
+                    });
+                    sequence += 1;
+                }
+                1 => {
+                    let duration = 1 + rng.next_u64() % max_duration_ticks;
+                    let delay = 1 + rng.next_u64() % max_delay_ticks;
+                    events.push(FaultEvent {
+                        tick,
+                        sequence,
+                        action: FaultAction::SetLinkDelay {
+                            from,
+                            to,
+                            ticks: delay,
+                        },
+                    });
+                    sequence += 1;
+                    events.push(FaultEvent {
+                        tick: tick.saturating_add(duration),
+                        sequence,
+                        action: FaultAction::SetLinkDelay { from, to, ticks: 0 },
+                    });
+                    sequence += 1;
+                }
+                2 => {
+                    events.push(FaultEvent {
+                        tick,
+                        sequence,
+                        action: FaultAction::DropNext {
+                            from,
+                            to,
+                            count: 1 + rng.next_u64() % 3,
+                        },
+                    });
+                    sequence += 1;
+                }
+                3 => {
+                    events.push(FaultEvent {
+                        tick,
+                        sequence,
+                        action: FaultAction::DuplicateNext {
+                            from,
+                            to,
+                            count: 1 + rng.next_u64() % 3,
+                        },
+                    });
+                    sequence += 1;
+                }
+                _ => {
+                    events.push(FaultEvent {
+                        tick,
+                        sequence,
+                        action: FaultAction::ReorderNext {
+                            from,
+                            to,
+                            count: 1 + rng.next_u64() % 2,
+                            extra_delay_ticks: 1 + rng.next_u64() % max_delay_ticks,
+                        },
+                    });
+                    sequence += 1;
+                }
+            }
+        }
+
+        Self::new(seed, events)
+    }
+
+    pub fn generate_network_faults_on_links(
+        seed: u64,
+        directed_links: &[(NodeId, NodeId)],
+        episode_count: usize,
+        max_gap_ticks: u64,
+        max_duration_ticks: u64,
+        max_delay_ticks: u64,
+    ) -> Self {
+        assert!(
+            !directed_links.is_empty(),
+            "directed_links must not be empty"
+        );
+        assert!(max_gap_ticks > 0, "max_gap_ticks must be > 0");
+        assert!(max_duration_ticks > 0, "max_duration_ticks must be > 0");
+        assert!(max_delay_ticks > 0, "max_delay_ticks must be > 0");
+
+        let mut rng = SplitMix64::new(seed);
+        let mut events = Vec::new();
+        let mut tick = 0_u64;
+        let mut sequence = 0_u64;
+
+        for _ in 0..episode_count {
+            tick = tick.saturating_add(1 + rng.next_u64() % max_gap_ticks);
+            let (from, to) = directed_links[(rng.next_u64() as usize) % directed_links.len()];
+
+            match rng.next_u64() % 5 {
+                0 => {
+                    let duration = 1 + rng.next_u64() % max_duration_ticks;
+                    events.push(FaultEvent {
+                        tick,
+                        sequence,
+                        action: FaultAction::Partition {
+                            a: from,
+                            b: to,
+                            bidirectional: false,
+                        },
+                    });
+                    sequence += 1;
+                    events.push(FaultEvent {
+                        tick: tick.saturating_add(duration),
+                        sequence,
+                        action: FaultAction::Heal {
+                            a: from,
+                            b: to,
+                            bidirectional: false,
+                        },
+                    });
+                    sequence += 1;
+                }
+                1 => {
+                    let duration = 1 + rng.next_u64() % max_duration_ticks;
+                    let delay = 1 + rng.next_u64() % max_delay_ticks;
+                    events.push(FaultEvent {
+                        tick,
+                        sequence,
+                        action: FaultAction::SetLinkDelay {
+                            from,
+                            to,
+                            ticks: delay,
+                        },
+                    });
+                    sequence += 1;
+                    events.push(FaultEvent {
+                        tick: tick.saturating_add(duration),
+                        sequence,
+                        action: FaultAction::SetLinkDelay { from, to, ticks: 0 },
+                    });
+                    sequence += 1;
+                }
+                2 => {
+                    events.push(FaultEvent {
+                        tick,
+                        sequence,
+                        action: FaultAction::DropNext {
+                            from,
+                            to,
+                            count: 1 + rng.next_u64() % 3,
+                        },
+                    });
+                    sequence += 1;
+                }
+                3 => {
+                    events.push(FaultEvent {
+                        tick,
+                        sequence,
+                        action: FaultAction::DuplicateNext {
+                            from,
+                            to,
+                            count: 1 + rng.next_u64() % 3,
+                        },
+                    });
+                    sequence += 1;
+                }
+                _ => {
+                    events.push(FaultEvent {
+                        tick,
+                        sequence,
+                        action: FaultAction::ReorderNext {
+                            from,
+                            to,
+                            count: 1 + rng.next_u64() % 2,
+                            extra_delay_ticks: 1 + rng.next_u64() % max_delay_ticks,
+                        },
+                    });
+                    sequence += 1;
+                }
+            }
+        }
+
+        Self::new(seed, events)
+    }
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -167,6 +556,9 @@ pub struct FaultReplayReport {
     pub events_applied: usize,
     pub source_failovers: usize,
     pub completed_migrations: usize,
+    pub transfer_drops: usize,
+    pub transfer_duplicates: usize,
+    pub bytes_attempted: u64,
     pub bytes_copied: u64,
     pub converged: bool,
     pub remaining_bytes: u64,
@@ -186,11 +578,7 @@ pub fn replay_migration_faults(
                 break;
             }
 
-            match event.action {
-                FaultAction::SetNodeHealth { node_id, health } => {
-                    let _ = scheduler.set_node_health(node_id, health);
-                }
-            }
+            apply_fault_action(scheduler, None, event.action);
 
             report.events_applied += 1;
             next_event += 1;
@@ -200,6 +588,9 @@ pub fn replay_migration_faults(
         report.ticks_executed = tick + 1;
         report.source_failovers += tick_report.source_failovers;
         report.completed_migrations += tick_report.completed;
+        report.transfer_drops += tick_report.transfer_drops;
+        report.transfer_duplicates += tick_report.transfer_duplicates;
+        report.bytes_attempted += tick_report.bytes_attempted;
         report.bytes_copied += tick_report.bytes_copied;
 
         if next_event == trace.events.len() && scheduler.is_converged() {
@@ -210,6 +601,103 @@ pub fn replay_migration_faults(
     report.converged = scheduler.is_converged();
     report.remaining_bytes = scheduler.remaining_bytes();
     report
+}
+
+pub fn replay_migration_faults_with_network(
+    scheduler: &mut MigrationScheduler,
+    network: &mut SimNetwork,
+    trace: &FaultTrace,
+    max_ticks: u64,
+) -> FaultReplayReport {
+    let mut report = FaultReplayReport::default();
+    let mut next_event = 0_usize;
+
+    let mut clock = SimClock::new();
+    for _ in 0..max_ticks {
+        let now_tick = clock.now();
+        while let Some(event) = trace.events.get(next_event) {
+            if event.tick != now_tick {
+                break;
+            }
+
+            apply_fault_action(scheduler, Some(network), event.action);
+            report.events_applied += 1;
+            next_event += 1;
+        }
+
+        let tick_report = scheduler.tick_with_transport(now_tick, network);
+        report.ticks_executed = now_tick + 1;
+        report.source_failovers += tick_report.source_failovers;
+        report.completed_migrations += tick_report.completed;
+        report.transfer_drops += tick_report.transfer_drops;
+        report.transfer_duplicates += tick_report.transfer_duplicates;
+        report.bytes_attempted += tick_report.bytes_attempted;
+        report.bytes_copied += tick_report.bytes_copied;
+
+        if next_event == trace.events.len() && scheduler.is_converged() {
+            break;
+        }
+        clock.advance();
+    }
+
+    report.converged = scheduler.is_converged();
+    report.remaining_bytes = scheduler.remaining_bytes();
+    report
+}
+
+fn apply_fault_action(
+    scheduler: &mut MigrationScheduler,
+    network: Option<&mut SimNetwork>,
+    action: FaultAction,
+) {
+    match action {
+        FaultAction::SetNodeHealth { node_id, health } => {
+            let _ = scheduler.set_node_health(node_id, health);
+        }
+        FaultAction::SetLinkDelay { from, to, ticks } => {
+            if let Some(network) = network {
+                network.set_delay(from, to, ticks);
+            }
+        }
+        FaultAction::DropNext { from, to, count } => {
+            if let Some(network) = network {
+                network.drop_next(from, to, count);
+            }
+        }
+        FaultAction::DuplicateNext { from, to, count } => {
+            if let Some(network) = network {
+                network.duplicate_next(from, to, count);
+            }
+        }
+        FaultAction::ReorderNext {
+            from,
+            to,
+            count,
+            extra_delay_ticks,
+        } => {
+            if let Some(network) = network {
+                network.reorder_next(from, to, count, extra_delay_ticks);
+            }
+        }
+        FaultAction::Partition {
+            a,
+            b,
+            bidirectional,
+        } => {
+            if let Some(network) = network {
+                network.partition(a, b, bidirectional);
+            }
+        }
+        FaultAction::Heal {
+            a,
+            b,
+            bidirectional,
+        } => {
+            if let Some(network) = network {
+                network.heal(a, b, bidirectional);
+            }
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -363,6 +851,138 @@ mod tests {
         assert_eq!(a.actual(), b.actual());
         assert_eq!(a.tasks().len(), b.tasks().len());
         assert!(report_a.converged);
+    }
+
+    #[test]
+    fn v1_health_trace_remains_readable() {
+        let trace = FaultTrace::from_text(
+            "feather-fault-trace-v1,7
+0,0,node-health,2,unavailable
+1,1,node-health,2,healthy
+",
+        )
+        .unwrap();
+
+        assert_eq!(trace.seed, 7);
+        assert_eq!(trace.events().len(), 2);
+    }
+
+    #[test]
+    fn network_trace_round_trip_is_stable() {
+        let trace = FaultTrace::new(
+            9,
+            vec![
+                FaultEvent {
+                    tick: 1,
+                    sequence: 0,
+                    action: FaultAction::SetLinkDelay {
+                        from: 2,
+                        to: 4,
+                        ticks: 3,
+                    },
+                },
+                FaultEvent {
+                    tick: 2,
+                    sequence: 1,
+                    action: FaultAction::DropNext {
+                        from: 2,
+                        to: 4,
+                        count: 2,
+                    },
+                },
+                FaultEvent {
+                    tick: 3,
+                    sequence: 2,
+                    action: FaultAction::DuplicateNext {
+                        from: 3,
+                        to: 4,
+                        count: 1,
+                    },
+                },
+                FaultEvent {
+                    tick: 4,
+                    sequence: 3,
+                    action: FaultAction::ReorderNext {
+                        from: 2,
+                        to: 4,
+                        count: 1,
+                        extra_delay_ticks: 5,
+                    },
+                },
+                FaultEvent {
+                    tick: 5,
+                    sequence: 4,
+                    action: FaultAction::Partition {
+                        a: 2,
+                        b: 4,
+                        bidirectional: false,
+                    },
+                },
+                FaultEvent {
+                    tick: 6,
+                    sequence: 5,
+                    action: FaultAction::Heal {
+                        a: 2,
+                        b: 4,
+                        bidirectional: false,
+                    },
+                },
+            ],
+        );
+
+        let text = trace.to_text();
+        let decoded = FaultTrace::from_text(&text).unwrap();
+        assert_eq!(decoded, trace);
+        assert_eq!(decoded.to_text(), text);
+    }
+
+    #[test]
+    fn same_seed_generates_identical_network_trace() {
+        let a = FaultTrace::generate_network_faults(8592, &[2, 3, 4], 30, 4, 5, 6);
+        let b = FaultTrace::generate_network_faults(8592, &[2, 3, 4], 30, 4, 5, 6);
+        let c = FaultTrace::generate_network_faults(8593, &[2, 3, 4], 30, 4, 5, 6);
+
+        assert_eq!(a, b);
+        assert_ne!(a, c);
+    }
+
+    #[test]
+    fn link_scoped_network_faults_are_deterministic() {
+        let links = [(2, 4), (3, 4)];
+        let a = FaultTrace::generate_network_faults_on_links(8592, &links, 40, 3, 4, 5);
+        let b = FaultTrace::generate_network_faults_on_links(8592, &links, 40, 3, 4, 5);
+
+        assert_eq!(a, b);
+        assert!(a.events().iter().all(|event| match event.action {
+            FaultAction::SetNodeHealth { .. } => false,
+            FaultAction::SetLinkDelay { from, to, .. }
+            | FaultAction::DropNext { from, to, .. }
+            | FaultAction::DuplicateNext { from, to, .. }
+            | FaultAction::ReorderNext { from, to, .. } => links.contains(&(from, to)),
+            FaultAction::Partition { a, b, .. } | FaultAction::Heal { a, b, .. } => {
+                links.contains(&(a, b))
+            }
+        }));
+    }
+
+    #[test]
+    fn bounded_network_faults_replay_and_converge() {
+        let trace = FaultTrace::generate_network_faults(8592, &[2, 3, 4], 40, 3, 4, 4);
+        let mut a = repair_scheduler();
+        let mut b = repair_scheduler();
+        let mut network_a = SimNetwork::default();
+        let mut network_b = SimNetwork::default();
+
+        let report_a =
+            replay_migration_faults_with_network(&mut a, &mut network_a, &trace, 100_000);
+        let report_b =
+            replay_migration_faults_with_network(&mut b, &mut network_b, &trace, 100_000);
+
+        assert_eq!(report_a, report_b);
+        assert_eq!(a.actual(), b.actual());
+        assert_eq!(report_a.events_applied, trace.events().len());
+        assert!(report_a.converged);
+        assert_eq!(report_a.remaining_bytes, 0);
     }
 
     #[test]

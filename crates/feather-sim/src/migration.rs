@@ -2,6 +2,9 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use crate::model::{AdminState, Cluster, NodeId, Placement, TabletId};
 use crate::placement::FailureDomainPolicy;
+use crate::transport::{
+    DirectMigrationTransport, MigrationTransport, TransferPoll, TransferRequest, TransferSubmit,
+};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd)]
 pub enum MigrationPriority {
@@ -42,6 +45,8 @@ pub struct MigrationTask {
     pub to: NodeId,
     pub bytes_total: u64,
     pub bytes_remaining: u64,
+    pub in_flight_bytes: u64,
+    pub in_flight_offset: u64,
     pub priority: MigrationPriority,
     pub state: MigrationState,
 }
@@ -74,6 +79,9 @@ pub struct TickReport {
     pub stale: usize,
     pub source_failovers: usize,
     pub grouped_cutovers: usize,
+    pub transfer_drops: usize,
+    pub transfer_duplicates: usize,
+    pub bytes_attempted: u64,
     pub bytes_copied: u64,
     pub active: usize,
     pub queued: usize,
@@ -221,9 +229,18 @@ impl MigrationScheduler {
     }
 
     pub fn tick(&mut self) -> TickReport {
+        let mut transport = DirectMigrationTransport;
+        self.tick_with_transport(0, &mut transport)
+    }
+
+    pub fn tick_with_transport<T: MigrationTransport>(
+        &mut self,
+        now_tick: u64,
+        transport: &mut T,
+    ) -> TickReport {
         let mut report = TickReport::default();
 
-        self.refresh_repair_sources(&mut report);
+        self.refresh_repair_sources(&mut report, transport);
         self.try_ready_cutovers(&mut report);
 
         let mut active_count = self.active_task_count();
@@ -272,6 +289,42 @@ impl MigrationScheduler {
                 continue;
             }
 
+            if self.tasks[index].in_flight_bytes > 0 {
+                match transport.poll(now_tick, self.tasks[index].id) {
+                    TransferPoll::Pending => continue,
+                    TransferPoll::Dropped => {
+                        self.tasks[index].in_flight_bytes = 0;
+                        self.tasks[index].in_flight_offset = 0;
+                        report.transfer_drops += 1;
+                    }
+                    TransferPoll::Delivered { bytes, duplicates } => {
+                        let delivered = bytes.min(self.tasks[index].in_flight_bytes);
+                        self.tasks[index].bytes_remaining =
+                            self.tasks[index].bytes_remaining.saturating_sub(delivered);
+                        self.tasks[index].in_flight_bytes = 0;
+                        self.tasks[index].in_flight_offset = 0;
+                        report.bytes_copied += delivered;
+                        report.transfer_duplicates += duplicates as usize;
+                    }
+                }
+
+                if self.tasks[index].in_flight_bytes > 0 {
+                    continue;
+                }
+            }
+
+            if self.tasks[index].bytes_remaining == 0 {
+                self.tasks[index].state = MigrationState::ReadyToCutover;
+                if self.try_cutover(index) {
+                    report.completed += 1;
+                    self.total_completed += 1;
+                    active_count = active_count.saturating_sub(1);
+                    decrement_node(&mut per_node, self.tasks[index].copy_source);
+                    decrement_node(&mut per_node, self.tasks[index].to);
+                }
+                continue;
+            }
+
             let copy_source = self.tasks[index].copy_source;
             let to = self.tasks[index].to;
             let from_left = self
@@ -294,13 +347,39 @@ impl MigrationScheduler {
                 continue;
             }
 
-            self.tasks[index].bytes_remaining -= amount;
+            let request = TransferRequest {
+                task_id: self.tasks[index].id,
+                chunk_offset: self.tasks[index]
+                    .bytes_total
+                    .saturating_sub(self.tasks[index].bytes_remaining),
+                from: copy_source,
+                to,
+                bytes: amount,
+            };
+
             bytes_left -= amount;
             *bytes_by_node.entry(copy_source).or_default() += amount;
             *bytes_by_node.entry(to).or_default() += amount;
-            report.bytes_copied += amount;
+            report.bytes_attempted += amount;
 
-            if self.tasks[index].bytes_remaining == 0 {
+            match transport.submit(now_tick, request) {
+                TransferSubmit::Delivered { bytes, duplicates } => {
+                    let delivered = bytes.min(amount);
+                    self.tasks[index].bytes_remaining =
+                        self.tasks[index].bytes_remaining.saturating_sub(delivered);
+                    report.bytes_copied += delivered;
+                    report.transfer_duplicates += duplicates as usize;
+                }
+                TransferSubmit::InFlight => {
+                    self.tasks[index].in_flight_bytes = amount;
+                    self.tasks[index].in_flight_offset = request.chunk_offset;
+                }
+                TransferSubmit::Dropped => {
+                    report.transfer_drops += 1;
+                }
+            }
+
+            if self.tasks[index].bytes_remaining == 0 && self.tasks[index].in_flight_bytes == 0 {
                 self.tasks[index].state = MigrationState::ReadyToCutover;
                 if self.try_cutover(index) {
                     report.completed += 1;
@@ -328,7 +407,11 @@ impl MigrationScheduler {
         report
     }
 
-    fn refresh_repair_sources(&mut self, report: &mut TickReport) {
+    fn refresh_repair_sources<T: MigrationTransport>(
+        &mut self,
+        report: &mut TickReport,
+        transport: &mut T,
+    ) {
         for index in 0..self.tasks.len() {
             if self.tasks[index].priority != MigrationPriority::Repair
                 || matches!(
@@ -355,8 +438,11 @@ impl MigrationScheduler {
             let next_source =
                 choose_repair_source(&self.cluster, &self.health, replicas, owner_to_replace);
 
+            transport.cancel(self.tasks[index].id);
             self.tasks[index].state = MigrationState::Pending;
             self.tasks[index].bytes_remaining = self.tasks[index].bytes_total;
+            self.tasks[index].in_flight_bytes = 0;
+            self.tasks[index].in_flight_offset = 0;
 
             if let Some(next_source) = next_source {
                 if next_source != current_source {
@@ -426,6 +512,8 @@ impl MigrationScheduler {
                     to,
                     bytes_total: tablet.bytes,
                     bytes_remaining: tablet.bytes,
+                    in_flight_bytes: 0,
+                    in_flight_offset: 0,
                     priority,
                     state: MigrationState::Pending,
                 });
@@ -1424,6 +1512,182 @@ mod tests {
         // A->B duplicates B, and B->A duplicates A. The whole replica-set
         // transition is safe and is therefore committed atomically.
         assert_ne!(scheduler.actual(), &actual);
+    }
+
+    #[test]
+    fn delayed_transport_does_not_cut_over_before_delivery() {
+        let cluster = one_tablet_cluster(100);
+        let actual = Placement {
+            replicas: BTreeMap::from([(1, vec![1, 2])]),
+        };
+        let desired = Placement {
+            replicas: BTreeMap::from([(1, vec![1, 3])]),
+        };
+        let mut scheduler = MigrationScheduler::new(
+            cluster,
+            FailureDomainPolicy::HIERARCHICAL,
+            actual.clone(),
+            desired.clone(),
+            MigrationBudget {
+                max_active: 1,
+                max_per_node_active: 1,
+                bytes_per_tick: 100,
+                max_bytes_per_node_per_tick: 100,
+                max_bytes_per_task_per_tick: 100,
+            },
+        )
+        .unwrap();
+
+        let mut network = crate::transport::SimNetwork::default();
+        network.set_delay(2, 3, 3);
+
+        let first = scheduler.tick_with_transport(0, &mut network);
+        assert_eq!(first.bytes_attempted, 100);
+        assert_eq!(first.bytes_copied, 0);
+        assert_eq!(scheduler.tasks()[0].in_flight_bytes, 100);
+        assert_eq!(scheduler.actual(), &actual);
+
+        scheduler.tick_with_transport(1, &mut network);
+        scheduler.tick_with_transport(2, &mut network);
+        assert_eq!(scheduler.actual(), &actual);
+        assert_eq!(scheduler.tasks()[0].bytes_remaining, 100);
+
+        let delivered = scheduler.tick_with_transport(3, &mut network);
+        assert_eq!(delivered.bytes_copied, 100);
+        assert_eq!(scheduler.actual(), &desired);
+        assert!(scheduler.is_converged());
+    }
+
+    #[test]
+    fn partition_blocks_copy_until_heal_then_converges() {
+        let cluster = one_tablet_cluster(100);
+        let actual = Placement {
+            replicas: BTreeMap::from([(1, vec![1, 2])]),
+        };
+        let desired = Placement {
+            replicas: BTreeMap::from([(1, vec![1, 3])]),
+        };
+        let mut scheduler = MigrationScheduler::new(
+            cluster,
+            FailureDomainPolicy::HIERARCHICAL,
+            actual.clone(),
+            desired.clone(),
+            MigrationBudget {
+                max_active: 1,
+                max_per_node_active: 1,
+                bytes_per_tick: 100,
+                max_bytes_per_node_per_tick: 100,
+                max_bytes_per_task_per_tick: 100,
+            },
+        )
+        .unwrap();
+
+        let mut network = crate::transport::SimNetwork::default();
+        network.partition(2, 3, false);
+
+        for tick in 0..3 {
+            let report = scheduler.tick_with_transport(tick, &mut network);
+            assert_eq!(report.transfer_drops, 1);
+            assert_eq!(report.bytes_copied, 0);
+            assert_eq!(scheduler.actual(), &actual);
+        }
+
+        network.heal(2, 3, false);
+        let healed = scheduler.tick_with_transport(3, &mut network);
+        assert_eq!(healed.bytes_copied, 100);
+        assert_eq!(scheduler.actual(), &desired);
+        assert!(scheduler.is_converged());
+    }
+
+    #[test]
+    fn duplicate_delivery_is_idempotent_for_copy_progress() {
+        let cluster = one_tablet_cluster(100);
+        let actual = Placement {
+            replicas: BTreeMap::from([(1, vec![1, 2])]),
+        };
+        let desired = Placement {
+            replicas: BTreeMap::from([(1, vec![1, 3])]),
+        };
+        let mut scheduler = MigrationScheduler::new(
+            cluster,
+            FailureDomainPolicy::HIERARCHICAL,
+            actual,
+            desired.clone(),
+            MigrationBudget {
+                max_active: 1,
+                max_per_node_active: 1,
+                bytes_per_tick: 100,
+                max_bytes_per_node_per_tick: 100,
+                max_bytes_per_task_per_tick: 100,
+            },
+        )
+        .unwrap();
+
+        let mut network = crate::transport::SimNetwork::default();
+        network.duplicate_next(2, 3, 1);
+
+        let report = scheduler.tick_with_transport(0, &mut network);
+
+        assert_eq!(report.transfer_duplicates, 1);
+        assert_eq!(report.bytes_attempted, 100);
+        assert_eq!(report.bytes_copied, 100);
+        assert_eq!(scheduler.tasks()[0].bytes_remaining, 0);
+        assert_eq!(scheduler.actual(), &desired);
+    }
+
+    #[test]
+    fn repair_source_failover_cancels_old_in_flight_chunk() {
+        let cluster = Cluster {
+            epoch: 1,
+            replication_factor: 3,
+            nodes: [
+                node(1, AdminState::Removed, "a"),
+                node(2, AdminState::Active, "b"),
+                node(3, AdminState::Active, "c"),
+                node(4, AdminState::Active, "d"),
+            ]
+            .into_iter()
+            .map(|node| (node.id, node))
+            .collect(),
+            tablets: vec![Tablet { id: 1, bytes: 100 }],
+        };
+        let actual = Placement {
+            replicas: BTreeMap::from([(1, vec![1, 2, 3])]),
+        };
+        let desired = Placement {
+            replicas: BTreeMap::from([(1, vec![2, 3, 4])]),
+        };
+        let mut scheduler = MigrationScheduler::new(
+            cluster,
+            FailureDomainPolicy::HIERARCHICAL,
+            actual,
+            desired.clone(),
+            MigrationBudget {
+                max_active: 1,
+                max_per_node_active: 1,
+                bytes_per_tick: 100,
+                max_bytes_per_node_per_tick: 100,
+                max_bytes_per_task_per_tick: 100,
+            },
+        )
+        .unwrap();
+
+        let mut network = crate::transport::SimNetwork::default();
+        network.set_delay(2, 4, 10);
+
+        let first = scheduler.tick_with_transport(0, &mut network);
+        assert_eq!(first.bytes_copied, 0);
+        assert_eq!(network.in_flight_count(), 1);
+        assert_eq!(scheduler.tasks()[0].copy_source, 2);
+
+        scheduler.set_node_health(2, NodeHealth::Unavailable);
+        let failover = scheduler.tick_with_transport(1, &mut network);
+
+        assert_eq!(failover.source_failovers, 1);
+        assert_eq!(scheduler.tasks()[0].copy_source, 3);
+        assert_eq!(network.in_flight_count(), 0);
+        assert_eq!(scheduler.actual(), &desired);
+        assert!(scheduler.is_converged());
     }
 
     #[test]

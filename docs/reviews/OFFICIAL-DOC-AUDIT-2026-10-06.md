@@ -238,3 +238,26 @@ FeatherDB now uses these as research evidence for:
     metadata cardinality budget
 
 It does not freeze Scylla's target tablet size or TiKV's wall-clock intervals as FeatherDB defaults.
+
+
+## Deterministic network/clock audit note
+
+The current simulator transport work was rechecked against current FoundationDB and TigerBeetle material.
+
+FoundationDB documents deterministic whole-cluster simulation by replacing physical interfaces and using virtual time in a single-threaded simulator. TigerBeetle VOPR likewise replaces nondeterministic clock/network/disk operations and explicitly injects packet drop/reorder and network partitions.
+
+FeatherDB now aligns with that mechanism for the migration/repair surface:
+
+- SimClock supplies replay time;
+- MigrationTransport separates protocol scheduling from physical delivery;
+- DirectMigrationTransport preserves immediate non-simulated behavior;
+- SimNetwork implements Delay/Drop/Duplicate/Reorder/Partition/Heal;
+- FaultTrace V2 persists and replays the exact schedule.
+
+Intentional scope difference: FeatherDB does not yet have a general message bus or deterministic disk adapter, so this is not yet comparable to whole-cluster FoundationDB/TigerBeetle simulation maturity.
+
+Official references:
+- https://apple.github.io/foundationdb/testing.html
+- https://apple.github.io/foundationdb/engineering.html
+- https://github.com/tigerbeetle/tigerbeetle/blob/main/docs/internals/vopr.md
+- https://tigerbeetle.com/blog/2026-08-20-protocol-aware-dst/

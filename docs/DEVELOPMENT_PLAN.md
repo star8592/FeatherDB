@@ -111,7 +111,7 @@ See docs/experiments/2026-10-07-range-resize.md.
 
 Still open:
 
-- data-aware vs midpoint split-boundary policy;
+- multi-objective split-boundary policy is implemented; production default remains unfrozen pending broader workload evidence;
 - integration with migration while resize and placement change concurrently;
 - deterministic crash injection at every resize transition.
 
@@ -201,19 +201,22 @@ Exit gate for ADR-0001 candidate:
 Implemented:
 
 - deterministic tick + sequence event ordering;
-- SplitMix64 seed-driven health-flap generation;
-- stable versioned text trace format;
+- SplitMix64 seed-driven health and network-fault generation;
+- virtual SimClock;
+- MigrationTransport abstraction shared by direct and simulated copy paths;
+- deterministic Delay/Drop/Duplicate/Reorder/Partition/Heal semantics;
+- stable V2 text trace with V1 health-trace compatibility;
 - trace round-trip and replay;
 - direct replay against real MigrationScheduler / Repair logic;
+- in-flight chunk fencing and cancellation on Repair source failover;
 - same-seed/same-trace reproducibility checks;
-- bounded health-fault convergence test.
+- bounded health/network-fault convergence tests.
 
-See docs/architecture/DETERMINISTIC-FAULTS-v0.md and docs/experiments/2026-10-07-deterministic-fault-replay.md.
+See docs/architecture/DETERMINISTIC-FAULTS-v0.md, docs/experiments/2026-10-07-deterministic-fault-replay.md, and docs/experiments/2026-10-07-deterministic-network.md.
 
 Still open:
 
-- deterministic clock abstraction shared with production-intent code;
-- Partition/Heal and packet Delay/Drop/Duplicate/Reorder;
+- general deterministic message bus shared by future membership/control/data protocols;
 - disk-full/slow/corrupt I/O;
 - CPU stall;
 - 100-node topology churn campaign.
@@ -279,12 +282,12 @@ Fault tests:
 - Phase 1.3: partial; strong-node join and failure-domain-pressure scenarios implemented.
 - RF=2 single-node removal movement now matches a failure-domain-aware constrained lower bound exactly.
 - Tablet resize controller: logical count control implemented with hysteresis, cooldown, metadata budget, epoch/generation fencing, and replay idempotency.
-- Tests: 42 passing.
+- Tests: 91 passing.
 - First experiment: `docs/experiments/2026-10-06-placement-baseline.md`.
 - ADR-0001: still Proposed.
 - ADR-0002: still Proposed.
 
-Next priority: deterministic network/clock fault adapters, compact million-tablet simulation, then production-substrate benchmarks.
+Next priority: compact million-tablet simulation, general deterministic message bus, then production-substrate benchmarks.
 
 ### Placement planner hypothesis
 
