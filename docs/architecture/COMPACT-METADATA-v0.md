@@ -211,24 +211,25 @@ CompactPlacement now supports weighted_rendezvous_for_catalog(). WRH hashes the 
 
 CompactMigrationCursor also supports a catalog-backed mode. A direct test verifies that catalog-backed lazy moves preserve stable TabletId and exactly match the eager scheduler's pure-rebalance order.
 
-### Remaining identity/index question
+### Reverse-index decision
 
-The catalog currently optimizes the hot path:
+The TabletId -> slot question has now been benchmarked and implemented as AdaptiveTabletIndex.
 
-    token -> range slot -> TabletId / replicas
+Default behavior:
 
-It does not yet add a permanent TabletId -> slot hash/tree index.
+    contiguous current-generation IDs
+      -> arithmetic slot lookup, zero heap index
 
-Adding a million-entry object-heavy index by default would partially recreate the memory problem we just removed.
+    non-contiguous IDs
+      -> sorted compact (TabletId, u32 slot) pairs
 
-Before freezing a reverse-lookup structure, benchmark alternatives such as:
+A 1M fragmented-ID experiment measured sorted rebuild at about 22 ms and lookup around 150-180 ns/op, while using 16 MB explicit index storage.
 
-- sorted/compact ID index when lifecycle ordering permits;
-- compact open-addressing hash table;
-- sparse/ephemeral indexes for active topology work;
-- operation-local slot handles.
+A custom flat open-address implementation reached ~35-36 ns/op but used about 25 MB explicit storage, so it remains an optional acceleration candidate rather than the permanent default.
 
-Stable identity is preserved now; reverse-lookup acceleration remains a measured design choice rather than an automatic BTreeMap.
+Current whole-map split/merge generations are executable-tested to retain the zero-allocation contiguous fast path.
+
+See docs/architecture/REVERSE-INDEX-v0.md and docs/experiments/2026-10-07-reverse-index.md.
 
 ## Scheduler decision
 

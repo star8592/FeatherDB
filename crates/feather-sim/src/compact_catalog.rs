@@ -1,9 +1,11 @@
 use crate::model::TabletId;
 use crate::range_resize::{HASH_SPACE_END, RangeResizeError, RangeTabletMap};
+use crate::reverse_index::{AdaptiveTabletIndex, ReverseIndexError};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum CompactCatalogError {
     Range(RangeResizeError),
+    ReverseIndex(ReverseIndexError),
     StartOverflow,
     CountMismatch,
     ZeroTablets,
@@ -14,6 +16,12 @@ pub enum CompactCatalogError {
 impl From<RangeResizeError> for CompactCatalogError {
     fn from(value: RangeResizeError) -> Self {
         Self::Range(value)
+    }
+}
+
+impl From<ReverseIndexError> for CompactCatalogError {
+    fn from(value: ReverseIndexError) -> Self {
+        Self::ReverseIndex(value)
     }
 }
 
@@ -108,6 +116,10 @@ impl CompactTabletCatalog {
         &self.ids
     }
 
+    pub fn build_reverse_index(&self) -> Result<AdaptiveTabletIndex, CompactCatalogError> {
+        Ok(AdaptiveTabletIndex::build(&self.ids)?)
+    }
+
     pub fn tablet_id(&self, slot: usize) -> Option<TabletId> {
         self.ids.get(slot).copied()
     }
@@ -196,6 +208,7 @@ impl CompactTabletCatalog {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::reverse_index::{AdaptiveTabletIndexKind, TabletReverseIndex};
 
     fn split_map(rounds: usize) -> RangeTabletMap {
         let mut map = RangeTabletMap::single(10, 10_000, vec![1, 2, 3]).unwrap();
@@ -260,6 +273,25 @@ mod tests {
         assert_eq!(catalog.total_bytes(), 123_457);
         assert_eq!(catalog.logical_bytes(), 24_000);
         assert!(catalog.route_slot(u64::MAX).is_some());
+    }
+
+    #[test]
+    fn current_full_split_merge_generations_use_contiguous_reverse_fast_path() {
+        let mut map = split_map(8);
+
+        for _ in 0..4 {
+            let catalog = CompactTabletCatalog::from_range_map(&map).unwrap();
+            let index = catalog.build_reverse_index().unwrap();
+            assert_eq!(index.kind(), AdaptiveTabletIndexKind::Contiguous);
+            assert_eq!(index.allocated_bytes(), 0);
+
+            for (slot, tablet_id) in catalog.tablet_ids().iter().copied().enumerate() {
+                assert_eq!(index.get(tablet_id), Some(slot as u32));
+            }
+
+            let merge = map.plan_merge_pairs(7).unwrap();
+            map.commit(&merge, 7).unwrap();
+        }
     }
 
     #[test]

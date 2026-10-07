@@ -135,11 +135,13 @@ Implemented research path:
 - CompactWindowScheduler now materializes only a bounded tablet window into the existing MigrationScheduler;
 - global forced Repair is completed before ordinary Rebalance materialization;
 - a 1M-tablet execution converges with 1024 peak full tasks (~90 KB task structs) and ~58 MB observed RSS in the synthetic release lab;
-- window size and actual copy concurrency are independently controlled;\n- Active-window epoch replacement is now fenced: higher epochs cancel stale in-flight transfers, retain committed actual ownership, and replan from current actual; equal/older epochs are rejected.
+- window size and actual copy concurrency are independently controlled;
+- Active-window epoch replacement is now fenced: higher epochs cancel stale in-flight transfers, retain committed actual ownership, and replan from current actual; equal/older epochs are rejected.
+- AdaptiveTabletIndex is benchmarked and implemented: contiguous IDs use zero-allocation arithmetic lookup; non-contiguous IDs use sorted compact pairs; flat open addressing remains optional acceleration.
 
-Stable identity follow-up is implemented: CompactTabletCatalog stores shared TabletId/range-start/bytes arrays, catalog-backed WRH hashes stable TabletId, and catalog-backed lazy migration preserves eager scheduler ordering. Reverse TabletId -> slot indexing remains unfrozen pending benchmark evidence.
+Stable identity follow-up is implemented: CompactTabletCatalog stores shared TabletId/range-start/bytes arrays, catalog-backed WRH hashes stable TabletId, and catalog-backed lazy migration preserves eager scheduler ordering. TabletId -> slot reverse lookup is now benchmarked and implemented through AdaptiveTabletIndex.
 
-See docs/architecture/COMPACT-METADATA-v0.md, docs/architecture/BOUNDED-MIGRATION-WINDOW-v0.md, docs/experiments/2026-10-07-million-tablet-compact.md, and docs/experiments/2026-10-07-bounded-million-migration.md.
+See docs/architecture/COMPACT-METADATA-v0.md, docs/architecture/BOUNDED-MIGRATION-WINDOW-v0.md, docs/architecture/REVERSE-INDEX-v0.md, docs/experiments/2026-10-07-million-tablet-compact.md, docs/experiments/2026-10-07-bounded-million-migration.md, and docs/experiments/2026-10-07-reverse-index.md.
 
 ## Phase 2 — migration model
 
@@ -304,12 +306,12 @@ Fault tests:
 - Phase 1.3: partial; strong-node join and failure-domain-pressure scenarios implemented.
 - RF=2 single-node removal movement now matches a failure-domain-aware constrained lower bound exactly.
 - Tablet resize controller: logical count control implemented with hysteresis, cooldown, metadata budget, epoch/generation fencing, and replay idempotency.
-- Tests: 116 passing.
+- Tests: 124 passing.
 - First experiment: `docs/experiments/2026-10-06-placement-baseline.md`.
 - ADR-0001: still Proposed.
 - ADR-0002: still Proposed.
 
-Next priority: reverse TabletId-index benchmark, general deterministic message bus, tablet-resize/migration generation fencing, then production-substrate benchmarks.
+Next priority: general deterministic message bus, tablet-resize/migration generation fencing, then production-substrate benchmarks.
 
 ### Placement planner hypothesis
 
