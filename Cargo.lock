@@ -5,3 +5,10 @@ version = 4
 [[package]]
 name = "feather-sim"
 version = "0.0.1"
+dependencies = [
+ "feather-storage-api",
+]
+
+[[package]]
+name = "feather-storage-api"
+version = "0.0.1"

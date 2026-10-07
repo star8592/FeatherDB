@@ -1,9 +1,8 @@
 [package]
-name = "feather-sim"
+name = "feather-storage-api"
 version = "0.0.1"
 edition.workspace = true
 rust-version.workspace = true
 publish = false
 
 [dependencies]
-feather-storage-api = { path = "../feather-storage-api" }
