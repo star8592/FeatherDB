@@ -1,5 +1,7 @@
 #![forbid(unsafe_code)]
 
+pub mod compact;
+pub mod compact_migration;
 pub mod fault;
 mod hash;
 pub mod metrics;
@@ -11,6 +13,9 @@ pub mod range_resize;
 pub mod resize;
 pub mod split_boundary;
 pub mod transport;
+
+pub use compact::{CompactPlacement, CompactPlacementError};
+pub use compact_migration::{CompactMigrationCursor, CompactMigrationMove};
 
 pub use fault::{
     FaultAction, FaultEvent, FaultReplayReport, FaultTrace, FaultTraceParseError,

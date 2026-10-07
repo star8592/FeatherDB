@@ -117,7 +117,25 @@ Still open:
 
 ### Tablet lifecycle track
 
-Logical split/merge control now implements hysteresis, cooldown, metadata-budget limits, generation/topology fencing, and crash-replay idempotency. Physical key-range split/merge execution remains open before ADR-0002 acceptance. See docs/architecture/TABLET-LIFECYCLE-v0.md.
+Logical split/merge control implements hysteresis, cooldown, metadata-budget limits, generation/topology fencing, and crash-replay idempotency. Physical hash-range split/merge execution is now implemented in the simulator through TabletRangeLifecycle, with coordinated count/range commits and replay fencing. Boundary objective selection remains a policy/research question rather than a correctness gap. See docs/architecture/TABLET-LIFECYCLE-v0.md.
+
+### Million-tablet compact metadata status
+
+The object-rich BTreeMap<TabletId, Vec<NodeId>> representation is retained as the correctness/reference model, but is no longer suitable as the only large-scale simulator representation.
+
+Implemented research path:
+
+- CompactPlacement uses a flat replica array with implicit contiguous simulator slots;
+- compact WRH is exactly equivalent to standard WRH in executable comparisons;
+- 1M tablets / RF=2 requires 32 MB for simultaneous before+after flat replica arrays;
+- observed compact peak RSS is ~34 MB vs ~226 MB for the original object-rich 1M comparison process;
+- CompactMigrationCursor reconstructs future moves lazily with RF-bounded buffering;
+- the 1M join produces 847,638 moves, while the lazy cursor peaks at one buffered move / 48 bytes in the tested RF=2 scenario;
+- pure-rebalance move ordering matches the eager MigrationScheduler exactly in a direct executable comparison.
+
+Important limitation: compact simulator slots are not yet a production TabletId/range catalog. Stable split/merge identities require a separate compact slot -> TabletId/range metadata layer.
+
+See docs/architecture/COMPACT-METADATA-v0.md and docs/experiments/2026-10-07-million-tablet-compact.md.
 
 ## Phase 2 — migration model
 
@@ -282,12 +300,12 @@ Fault tests:
 - Phase 1.3: partial; strong-node join and failure-domain-pressure scenarios implemented.
 - RF=2 single-node removal movement now matches a failure-domain-aware constrained lower bound exactly.
 - Tablet resize controller: logical count control implemented with hysteresis, cooldown, metadata budget, epoch/generation fencing, and replay idempotency.
-- Tests: 91 passing.
+- Tests: 100 passing.
 - First experiment: `docs/experiments/2026-10-06-placement-baseline.md`.
 - ADR-0001: still Proposed.
 - ADR-0002: still Proposed.
 
-Next priority: compact million-tablet simulation, general deterministic message bus, then production-substrate benchmarks.
+Next priority: bounded active migration window over compact actual/desired maps, compact stable TabletId/range catalog, general deterministic message bus, then production-substrate benchmarks.
 
 ### Placement planner hypothesis
 

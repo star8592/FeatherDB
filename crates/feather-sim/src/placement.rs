@@ -104,29 +104,38 @@ fn select_replicas(
     selected
 }
 
+pub(crate) fn weighted_rendezvous_replicas(
+    cluster: &Cluster,
+    tablet_id: u64,
+    policy: FailureDomainPolicy,
+) -> Vec<NodeId> {
+    let mut ranked: Vec<(f64, NodeId)> = cluster
+        .nodes
+        .values()
+        .filter(|node| node.eligible())
+        .map(|node| {
+            let u = unit_interval_open(hash_pair(tablet_id, node.id));
+            // Weighted HRW: score = -weight / ln(U), choose highest score.
+            // f64 is acceptable for the simulator; production placement must
+            // later define cross-platform deterministic numeric semantics.
+            let score = -(node.weight as f64) / u.ln();
+            (score, node.id)
+        })
+        .collect();
+
+    ranked.sort_by(|a, b| b.0.total_cmp(&a.0).then_with(|| a.1.cmp(&b.1)));
+    let ranked_ids: Vec<_> = ranked.into_iter().map(|(_, id)| id).collect();
+    select_replicas(cluster, &ranked_ids, policy)
+}
+
 fn place_weighted_rendezvous(cluster: &Cluster, policy: FailureDomainPolicy) -> Placement {
     let mut placement = Placement::default();
 
     for tablet in &cluster.tablets {
-        let mut ranked: Vec<(f64, NodeId)> = cluster
-            .nodes
-            .values()
-            .filter(|node| node.eligible())
-            .map(|node| {
-                let u = unit_interval_open(hash_pair(tablet.id, node.id));
-                // Weighted HRW: score = -weight / ln(U), choose highest score.
-                // f64 is acceptable for the simulator; production placement must
-                // later define cross-platform deterministic numeric semantics.
-                let score = -(node.weight as f64) / u.ln();
-                (score, node.id)
-            })
-            .collect();
-
-        ranked.sort_by(|a, b| b.0.total_cmp(&a.0).then_with(|| a.1.cmp(&b.1)));
-        let ranked_ids: Vec<_> = ranked.into_iter().map(|(_, id)| id).collect();
-        placement
-            .replicas
-            .insert(tablet.id, select_replicas(cluster, &ranked_ids, policy));
+        placement.replicas.insert(
+            tablet.id,
+            weighted_rendezvous_replicas(cluster, tablet.id, policy),
+        );
     }
 
     placement
