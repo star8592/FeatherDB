@@ -1,0 +1,18 @@
+[package]
+name = "feather-transport-quinn"
+version = "0.0.1"
+edition.workspace = true
+rust-version.workspace = true
+publish = false
+
+[dependencies]
+feather-transport-api = { path = "../feather-transport-api" }
+feather-wire = { path = "../feather-wire" }
+quinn = { version = "0.11.12", default-features = false, features = ["runtime-tokio", "rustls-ring", "bloom"] }
+tokio = { version = "1.53.2", features = ["rt", "sync"] }
+
+[dev-dependencies]
+feather-sim = { path = "../feather-sim" }
+rcgen = "0.14.10"
+rustls = { version = "0.23.45", default-features = false, features = ["ring", "std", "tls12"] }
+tokio = { version = "1.53.2", features = ["macros", "rt-multi-thread", "sync", "time"] }
