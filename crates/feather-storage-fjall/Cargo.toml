@@ -10,4 +10,5 @@ feather-storage-api = { path = "../feather-storage-api" }
 fjall = "3.1.12"
 
 [dev-dependencies]
+feather-sim = { path = "../feather-sim" }
 tempfile = "3.23.0"

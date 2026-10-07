@@ -120,6 +120,7 @@ version = "0.0.1"
 name = "feather-storage-fjall"
 version = "0.0.1"
 dependencies = [
+ "feather-sim",
  "feather-storage-api",
  "fjall",
  "tempfile",

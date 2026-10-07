@@ -79,3 +79,22 @@ redb stays in the benchmark matrix and remains a plausible fallback if the data-
 ## Rust baseline
 
 FeatherDB now standardizes on Rust 1.99.0 and Edition 2024. The root toolchain file pins compiler, rustfmt and clippy so local development and CI can reproduce the same compiler surface. This supersedes the earlier Rust 1.85 core / Rust 1.90 experiment split.
+
+
+## Production Fjall adapter status
+
+The validated experiment has been promoted into `crates/feather-storage-fjall`. The production candidate now implements the shared `feather-storage-api::DurableStore` boundary and carries its own protocol/recovery tests.
+
+Verified in the production crate:
+
+- staged unsynced Put is discarded on crash/reopen;
+- SyncAll Put survives reopen;
+- synced Delete survives reopen;
+- PREPARED survives reopen and returns ReplayPrepared;
+- CURRENT publication survives reopen and returns Current(target);
+- stale PREPARED GC survives reopen;
+- active PREPARED is not garbage-collected;
+- `DurableResizeTransaction` reconstructs RuntimeCoordinator and migration work from real Fjall;
+- `std::io::ErrorKind::StorageFull` is preserved as `DiskError::Full` through both top-level Fjall I/O errors and nested LSM I/O errors.
+
+The experiment crate remains as an external crash/recovery harness, while correctness responsibility for the adapter now lives in the production crate.

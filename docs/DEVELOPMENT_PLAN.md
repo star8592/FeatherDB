@@ -328,6 +328,7 @@ Rust 1.99 / Edition 2024 is now the repository-wide toolchain baseline. The root
 ### Real Fjall durability adapter
 
 Fjall real DurableStore adapter now passes seven protocol/recovery tests plus an external kill -9 crash probe on ext4: unsynced staged data disappears after process death, while SyncAll data survives. CI and Dependabot now cover the standalone experiment workspace. See docs/experiments/2026-10-08-fjall-durable-adapter.md.
+Production `feather-storage-fjall` now owns nine adapter/protocol tests, including PREPARED/CURRENT recovery, PREPARED GC, RuntimeCoordinator reconstruction, and StorageFull error preservation.
 
 ### Production storage substrate benchmark
 
@@ -339,7 +340,7 @@ Current hypothesis is single-engine Fjall V0 rather than redb-control + Fjall-da
 
 See docs/architecture/STORAGE-SUBSTRATE-v0.md and docs/experiments/2026-10-07-storage-backend-bench.md.
 
-Next priority: promote/reshape the validated Fjall DurableStore adapter toward a production storage crate, run concurrent-writer/compaction-tail tests, then QUIC transport substrate benchmark.
+Next priority: run concurrent-writer/compaction-tail tests for the production Fjall candidate, then QUIC transport substrate benchmark.
 
 ### Placement planner hypothesis
 
